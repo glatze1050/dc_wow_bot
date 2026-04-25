@@ -9,8 +9,8 @@ wow_bot_data.json
 # PyInstaller artifacts
 build/
 dist/
-*.exe
 *.spec.bak
+# bot.exe is tracked on purpose (distributed binary)
 
 # Python
 __pycache__/
