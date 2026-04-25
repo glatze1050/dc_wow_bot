@@ -1,0 +1,319 @@
+═══════════════════════════════════════════════════════════════
+                  WoW DISCORD BOT — SETUP GUIDE
+═══════════════════════════════════════════════════════════════
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 1 — DISCORD DEVELOPER PORTAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. Go to: https://discord.com/developers/applications
+  2. Click "New Application" → give it a name (e.g. WoW Bot)
+  3. Left menu → "Bot" → "Reset Token" → copy the token
+  4. Enable Privileged Gateway Intents:
+       [✓] SERVER MEMBERS INTENT
+       [✓] MESSAGE CONTENT INTENT
+  5. Left menu → "OAuth2" → "URL Generator"
+       Scopes:          [✓] bot   [✓] applications.commands
+       Bot Permissions: [✓] Read Messages / View Channels
+                        [✓] Send Messages
+                        [✓] Read Message History
+                        [✓] Embed Links
+  6. Copy the URL → invite bot to your server
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 2 — BLIZZARD API CREDENTIALS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Required for: Profile, Gear, Stats, Achievements (in /wow check)
+NOT required for: M+ Score, Raid Progression (use RaiderIO API)
+
+  1. Go to: https://develop.battle.net
+  2. Log in with your Battle.net account
+  3. Click "Create Client"
+  4. Fill in:
+       Client Name:    WoW Discord Bot
+       Redirect URLs:  http://localhost
+       Service URL:    (leave empty)
+       Intended Use:   Game Data APIs
+  5. Click "Save"
+  6. Copy your "Client ID" and "Client Secret"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 3 — WARCRAFT LOGS API CREDENTIALS (optional)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Required for: Raid Parses / Best-Performance-Werte (Embed 4 in /wow check)
+Ohne diese Credentials funktioniert /wow check weiterhin — nur die
+WCL-Seite bleibt leer.
+
+  1. Gehe zu: https://www.warcraftlogs.com/api/clients/
+  2. Logge dich mit deinem Warcraft-Logs-Account ein
+  3. Klicke "Create Client"
+  4. Fülle aus:
+       Application Name:  WoW Discord Bot
+       Redirect URLs:     (leer lassen)
+       Public Client:     NEIN (unchecked)
+  5. Klicke "Create"
+  6. Kopiere "Client ID" und "Client Secret"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 4 — SETTING UP THE .ENV FILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Create a file called  .env  in the bot folder:
+
+  ┌────────────────────────────────────────────────────────┐
+  │  DISCORD_TOKEN=your_discord_token_here                 │
+  │  BLIZZARD_CLIENT_ID=your_client_id_here                │
+  │  BLIZZARD_CLIENT_SECRET=your_client_secret_here        │
+  │  WCL_CLIENT_ID=your_wcl_client_id_here                 │
+  │  WCL_CLIENT_SECRET=your_wcl_client_secret_here         │
+  └────────────────────────────────────────────────────────┘
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 5 — STARTING THE BOT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  OPTION A — Fertige bot.exe (empfohlen):
+    1. Stelle sicher, dass .env im gleichen Ordner wie bot.exe liegt.
+    2. Doppelklick auf bot.exe
+    → Kein Python, keine pip-Installation nötig.
+
+  OPTION B — Aus Python-Source starten:
+    1. Python installieren: https://www.python.org/downloads
+       !! Check "Add Python to PATH" !!
+    2. Command Prompt im Bot-Ordner öffnen:
+         cd "C:\Pfad\zum\DC_WOW"
+    3. Dependencies installieren:
+         pip install -r requirements.txt
+    4. Bot starten:
+         python bot.py
+
+  Bei erfolgreichem Start siehst du:
+    [INFO] Logged in as       : WoWBot#1234
+    [INFO] Blizzard API       : Configured ✓
+    [INFO] Warcraft Logs API  : Configured ✓
+    [INFO] Commands           : /wow check · /wow compare · /wowsetup
+    [INFO] News-Quellen       : Blizzard Official + Wowhead + Bluetracker (EU)
+    [INFO] Background tasks   : Gestartet
+    [INFO] Slash commands     : Synced
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 6 — ADMIN SETUP (FIRST TIME)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  After starting the bot, set up channels in Discord:
+  (Right-click channel → Copy Channel ID for the ID)
+
+  /wowsetup news_channel   <channel_id>   → News & Patch Notes
+  /wowsetup reset_channel  <channel_id>   → Weekly reset reminders
+  /wowsetup maint_channel  <channel_id>   → Maintenance warnings
+  /wowsetup overview                      → Check current config
+
+  All responses are only visible to you (ephemeral).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 7 — COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Spieler-Befehle:
+
+  /wow check <name> <realm> [region]
+
+    Vollständiger Character-Check — aufgeteilt in 4 Embeds:
+
+    ┌─ Embed 1: Profil, Gear & Stats ───────────────────────┐
+    │  📋 Profil                                             │
+    │     • Klasse, Spec, Rasse, Fraktion                   │
+    │     • Guild, Level, Item Level (equipped + avg)       │
+    │     • Achievement Points                               │
+    │     • Zuletzt online (relativ, z.B. "vor 2 Stunden")  │
+    │  🎯 Content Readiness (für welchen Content bereit)    │
+    │                                                        │
+    │  🛡️ Gear (alle 16 Slots)                              │
+    │     • Slot-Name, Item-Name, Item Level                 │
+    │     • Qualitäts-Farbe: 🟣 Epic  🔵 Rare               │
+    │                        🟢 Uncommon  🟠 Legendary      │
+    │                                                        │
+    │  📊 Sekundärstats (Hauptstat-Badge)                    │
+    │     • Haste, Crit, Mastery, Versatility               │
+    │       (in % und Rating)                                │
+    └────────────────────────────────────────────────────────┘
+
+    ┌─ Embed 2: Mythic+ & Raids ────────────────────────────┐
+    │  🗝️ Mythic+ Score                                     │
+    │     • Overall Score (farbkodiert nach Score)           │
+    │     • Score nach Rolle: Tank / Healer / DPS           │
+    │                                                        │
+    │  🏅 Top 5 M+ Runs                                      │
+    │     • Dungeon, Key-Level, Upgrades ⭐, Score           │
+    │                                                        │
+    │  🏰 Raid Progression (alle aktuellen Raids)            │
+    │     • Normal / Heroic / Mythic                        │
+    │     • Mit Fortschrittsbalken: ████░░░░ 6/8            │
+    │                                                        │
+    │  🔗 Link zum RaiderIO-Profil                          │
+    └────────────────────────────────────────────────────────┘
+
+    ┌─ Embed 3: PvP & Achievements ─────────────────────────┐
+    │  🏆 PvP Stats (alle Brackets der aktuellen Season)    │
+    │     • 2v2 / 3v3 / Solo Shuffle / Rated BG / Skirmish  │
+    │     • Rating, Wins/Losses, Winrate %                  │
+    │                                                        │
+    │  🎖️ Achievements (8 neueste)                          │
+    │     • Gesamtpunkte & Anzahl abgeschlossener Ach.      │
+    │     • Name + Datum der 8 neuesten                     │
+    └────────────────────────────────────────────────────────┘
+
+    ┌─ Embed 4: Raid Logs (Warcraft Logs) ──────────────────┐
+    │  🗡️ Gesamt-Performance                                 │
+    │     • Best Avg Parse · Median Avg Parse                │
+    │     • Aktueller Raid + Difficulty                      │
+    │                                                        │
+    │  🏆 Boss-Parses (bis zu 12 Bosse)                      │
+    │     • Boss-Name, Spec, Parse % (farbkodiert), DPS     │
+    │     • 🟠 99+  🟣 95+  🔵 75+  🟢 50+  ⚪ 25+  ⬜ <25 │
+    │                                                        │
+    │  🔗 Link zum Warcraft-Logs-Profil                     │
+    │                                                        │
+    │  Nur sichtbar wenn WCL-Credentials gesetzt sind        │
+    │  und der Character öffentliche Logs hat.               │
+    └────────────────────────────────────────────────────────┘
+
+    Beispiele:
+      /wow check Thrall Draenor eu
+      /wow check Arthas Silvermoon eu
+      /wow check Jaina Stormscale eu
+      /wow check Sylvanas twisting-nether eu
+
+    Realm mit Leerzeichen → Bindestriche:
+      "Twisting Nether" → twisting-nether   (Bot macht das automatisch)
+      "Aggra (Português)" → aggra-portugues (Bot macht das automatisch)
+
+
+  /wow compare <name1> <realm1> <name2> <realm2> [region]
+
+    Vergleicht zwei Characters direkt nebeneinander:
+      • Klasse, Spec, iLvl
+      • Mythic+ Score
+      • Achievement Points
+      • Zuletzt online
+      → Gewinner pro Kategorie: ✅ / 🔴 / 🟡
+
+    Beispiel:
+      /wow compare Thrall Draenor Jaina Stormscale eu
+
+ADMIN COMMANDS:
+
+  /wowsetup news_channel  <channel_id>   News-Channel setzen
+  /wowsetup reset_channel <channel_id>   Reset-Channel setzen
+  /wowsetup maint_channel <channel_id>   Maintenance-Channel setzen
+  /wowsetup overview                     Aktuelle Konfiguration anzeigen
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 8 — NEWS-QUELLEN (woher kommen die News?)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Der Bot bezieht News aus DREI Quellen:
+
+  🔵 worldofwarcraft.blizzard.com  (Offizielle Quelle)
+     → Offizielle Blizzard-Artikel: Patch Notes, Hotfixes,
+       Events, Blue Posts, Shop-News
+     → Direkt von Blizzard, immer 100% offiziell
+     → Beispiel-URL: worldofwarcraft.blizzard.com/en-gb/news
+
+  📰 wowhead.com  (Community-Quelle)
+     → Datamines: Neue Items, Spells, NPCs aus PTR-Patches
+     → Schnelle Hotfix-Zusammenfassungen
+     → Guides & Class-Changes Breakdowns
+     → Oft schneller als Blizzard selbst bei Breaking News
+     → Beispiel-URL: wowhead.com/news
+
+  🔷 bluetracker.gg  (EU Blue Posts)
+     → Offizielle Blizzard-Forumsposts (Blue Posts)
+     → Gefiltert auf EU-Region
+     → Beispiel-URL: bluetracker.gg/rss/wow/
+
+  Wie es funktioniert:
+    → Alle drei Quellen werden stündlich geprüft
+    → Jeder Artikel wird nur EINMAL gepostet (kein Spam)
+    → Blizzard-Artikel erscheinen in Blau 🔵
+    → Wowhead-Artikel erscheinen in Rot 📰
+    → Bluetracker-Posts erscheinen in Hellblau 🔷
+    → Nur patchrelevante Themen (Filter nach Keywords:
+      patch, hotfix, update, nerf, buff, season, class, ...)
+    → Gesehene Artikel werden in wow_bot_data.json gespeichert
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 9 — AUTOMATIC POSTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PATCH NEWS (stündliche Prüfung):
+  → Prüft alle drei News-Quellen (Blizzard + Wowhead + Bluetracker).
+  → Postet im news_channel wenn ein neuer Artikel erscheint.
+  → Kein Duplikat — jeder Artikel wird nur einmal gepostet.
+
+WEEKLY RESET REMINDER (jeden Dienstag):
+  → Postet einen Reminder 3 Stunden vor dem EU-Reset (07:00 UTC).
+  → Zeigt EU- und US-Resetzeit mit Countdown.
+  → Checkliste: Vault, Raids, World Quests, PvP Cap, Delves.
+
+MAINTENANCE WARNING (alle 4 Stunden):
+  → Prüft den Blizzard-Service-Status.
+  → Postet eine Warnung wenn WoW in Maintenance geht.
+  → Farbkodiert: 🔧 Maintenance  ⚠️ Partial  🔴 Major Outage
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PART 10 — TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"Character not found"?
+  → Name und Realm-Schreibweise überprüfen.
+  → Realm-Namen mit Leerzeichen → Bindestriche:
+    "Twisting Nether" → twisting-nether (Bot macht das auto)
+  → Character muss auf einem Retail-Server sein (kein Classic).
+
+M+ Score / Raid Progression fehlt?
+  → Character muss sich kürzlich eingeloggt haben damit
+    RaiderIO aktuelle Daten hat.
+  → Manuell prüfen: https://raider.io
+
+Gear / Stats / Achievements fehlen?
+  → Blizzard API Credentials in der .env prüfen.
+  → BLIZZARD_CLIENT_ID und BLIZZARD_CLIENT_SECRET müssen korrekt sein.
+  → Keine Leerzeichen vor/nach den Werten.
+
+Raid Logs / WCL-Seite leer?
+  → WCL_CLIENT_ID und WCL_CLIENT_SECRET in der .env prüfen.
+  → Character muss öffentliche Logs auf warcraftlogs.com haben.
+  → Realm/Region müssen korrekt sein (EU/US).
+  → Credentials neu erstellen: https://www.warcraftlogs.com/api/clients/
+
+Slash Commands erscheinen nicht?
+  → 1-2 Minuten nach dem Start warten.
+  → Im Discord als Bot-Owner !sync tippen um manuell zu synchen.
+
+Blizzard API gibt 401 zurück?
+  → Client ID und Client Secret in der .env prüfen.
+  → Credentials auf develop.battle.net neu generieren.
+
+News/Reset/Maintenance werden nicht gepostet?
+  → Channels mit /wowsetup setzen.
+  → Mit /wowsetup overview prüfen ob Channels konfiguriert sind.
+  → Bot muss durchgehend laufen — er prüft nach Timer.
+
+Zu viele/doppelte News-Posts?
+  → Die Datei wow_bot_data.json löschen und Bot neu starten.
+  → Das setzt den "gesehen" Verlauf zurück.
+
+═══════════════════════════════════════════════════════════════
