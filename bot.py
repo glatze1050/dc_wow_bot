@@ -3,10 +3,15 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import aiohttp
 import asyncio
-import os
-import json
 import base64
-from datetime import datetime, timezone
+import html
+import json
+import os
+import re
+import unicodedata
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -86,12 +91,12 @@ DUNGEON_NAMES = {
 
 # Content readiness thresholds (equipped ilvl)
 CONTENT_THRESHOLDS = [
-    (636, "✅ Bereit für **Mythic Raid**"),
-    (619, "✅ Bereit für **Heroic Raid** & hohe M+"),
-    (606, "✅ Bereit für **Normal Raid** & M+ 10+"),
-    (593, "✅ Bereit für **M+ 5+** & LFR"),
-    (580, "⚠️ Bereit für **M+ 2-4** & LFR"),
-    (0,   "🔰 Noch im Gearing-Prozess — M0 & World Quests empfohlen"),
+    (636, "✅ Ready for **Mythic Raid**"),
+    (619, "✅ Ready for **Heroic Raid** & high M+"),
+    (606, "✅ Ready for **Normal Raid** & M+ 10+"),
+    (593, "✅ Ready for **M+ 5+** & LFR"),
+    (580, "⚠️ Ready for **M+ 2-4** & LFR"),
+    (0,   "🔰 Still gearing up — M0 & World Quests recommended"),
 ]
 
 # ─────────────────────────────────────────
@@ -101,7 +106,13 @@ def load_data() -> dict:
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
             return json.load(f)
-    return {"news_channel": None, "reset_channel": None, "maint_channel": None, "seen_news": []}
+    return {
+        "news_channel":  None,
+        "reset_channel": None,
+        "maint_channel": None,
+        "seen_news":     [],
+        "news_schema":   0,
+    }
 
 def save_data():
     with open(DATA_FILE, "w") as f:
@@ -110,6 +121,7 @@ def save_data():
             "reset_channel": reset_channel_id,
             "maint_channel": maint_channel_id,
             "seen_news":     seen_news,
+            "news_schema":   news_schema,
         }, f, indent=2)
 
 _data            = load_data()
@@ -117,6 +129,7 @@ news_channel_id  = _data.get("news_channel",  None)
 reset_channel_id = _data.get("reset_channel", None)
 maint_channel_id = _data.get("maint_channel", None)
 seen_news: list  = _data.get("seen_news",     [])
+news_schema: int = _data.get("news_schema",   0)
 
 # ─────────────────────────────────────────
 #  BLIZZARD TOKEN CACHE
@@ -143,11 +156,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ─────────────────────────────────────────
 def error_embed(msg: str) -> discord.Embed:
     embed = discord.Embed(
-        title="❌  Fehler",
+        title="❌  Error",
         description=msg,
         color=0xC41E3A,
     )
-    embed.set_footer(text="WoW Bot  ·  Fehler")
+    embed.set_footer(text="WoW Bot  ·  Error")
     return embed
 
 def is_admin(interaction: discord.Interaction) -> bool:
@@ -198,7 +211,7 @@ async def get_blizzard_token(region: str = "eu") -> str:
             data={"grant_type": "client_credentials"},
         ) as r:
             if r.status != 200:
-                raise ValueError(f"Blizzard Auth Fehler {r.status}")
+                raise ValueError(f"Blizzard auth failed ({r.status})")
             data = await r.json()
             _blizzard_token        = data["access_token"]
             _blizzard_token_expiry = now + data["expires_in"]
@@ -211,9 +224,9 @@ async def blizzard_get(path: str, region: str = "eu") -> dict:
     async with aiohttp.ClientSession() as s:
         async with s.get(url, params=params, headers={"Authorization": f"Bearer {token}"}) as r:
             if r.status == 404:
-                raise ValueError("Character nicht gefunden. Name und Realm prüfen.")
+                raise ValueError("Character not found. Check the name and realm.")
             if r.status != 200:
-                raise ValueError(f"Blizzard API Fehler {r.status}")
+                raise ValueError(f"Blizzard API error ({r.status})")
             return await r.json()
 
 def realm_slug(realm: str) -> str:
@@ -245,9 +258,9 @@ async def get_raiderio(realm: str, name: str, region: str) -> dict:
     async with aiohttp.ClientSession() as s:
         async with s.get("https://raider.io/api/v1/characters/profile", params=params) as r:
             if r.status == 400:
-                raise ValueError("Character nicht auf RaiderIO gefunden.")
+                raise ValueError("Character not found on Raider.IO.")
             if r.status != 200:
-                raise ValueError(f"RaiderIO Fehler {r.status}")
+                raise ValueError(f"Raider.IO error ({r.status})")
             return await r.json()
 
 # ─────────────────────────────────────────
@@ -266,14 +279,14 @@ async def get_wcl_token() -> str:
             data={"grant_type": "client_credentials"},
         ) as r:
             if r.status != 200:
-                raise ValueError(f"WCL Auth Fehler {r.status}")
+                raise ValueError(f"Warcraft Logs auth failed ({r.status})")
             data = await r.json()
             _wcl_token        = data["access_token"]
             _wcl_token_expiry = now + data["expires_in"]
             return _wcl_token
 
 async def get_wcl_character(realm: str, name: str, region: str) -> dict:
-    """Holt zoneRankings (beste Parses im aktuellen Raid) + Profil-Link."""
+    """Best parses in the current raid zone, plus the profile link."""
     token = await get_wcl_token()
     query = """
     query($name: String!, $server: String!, $region: String!) {
@@ -300,11 +313,11 @@ async def get_wcl_character(realm: str, name: str, region: str) -> dict:
             timeout=aiohttp.ClientTimeout(total=15),
         ) as r:
             if r.status != 200:
-                raise ValueError(f"WCL API Fehler {r.status}")
+                raise ValueError(f"Warcraft Logs API error ({r.status})")
             data = await r.json()
             char = (data.get("data") or {}).get("characterData", {}).get("character")
             if not char:
-                raise ValueError("Character nicht auf Warcraft Logs.")
+                raise ValueError("Character not found on Warcraft Logs.")
             return char
 
 def wcl_parse_emoji(pct: float) -> str:
@@ -316,124 +329,333 @@ def wcl_parse_emoji(pct: float) -> str:
     return "⬜"                  # Poor
 
 # ─────────────────────────────────────────
-#  NEWS FETCHER
-#  Quelle 1: worldofwarcraft.blizzard.com — Offizielle News & Patch Notes
-#  Quelle 2: wowhead.com                  — Datamines, Hotfixes, Guides
-#  Quelle 3: bluetracker.gg               — Blue Posts (nur EU-gefiltert)
+#  NEWS SOURCES
+#  1. worldofwarcraft.blizzard.com  — official news & patch notes
+#  2. wowhead.com                   — datamines, hotfixes, guides
+#  3. bluetracker.gg                — blue posts (EU only)
+#
+#  All three mirror each other, so every article is reduced to a set of
+#  fingerprints and only the first source that carries it gets posted.
 # ─────────────────────────────────────────
+BLIZZARD_NEWS_URL = "https://worldofwarcraft.blizzard.com/en-gb/news"
+WOWHEAD_RSS_URL   = "https://www.wowhead.com/news/rss/all"
+BLUETRACKER_RSS   = "https://www.bluetracker.gg/rss/wow/"
+
+# Wowhead publishes dozens of items a day, so it is the only feed we filter.
 NEWS_KEYWORDS = [
     "patch", "hotfix", "update", "maintenance", "notes",
     "season", "fix", "change", "nerf", "buff", "class",
 ]
 
-# Fallback-Thumbnails pro Quelle (rechts im Embed)
-DEFAULT_THUMB_BLIZZARD    = "https://wow.zamimg.com/images/wow/icons/large/inv_misc_questionmark.jpg"
-DEFAULT_THUMB_WOWHEAD     = "https://wow.zamimg.com/images/logos/wh-icon-300.png"
-DEFAULT_THUMB_BLUETRACKER = "https://bnetcmsus-a.akamaihd.net/cms/blog_header/x9/X9Y9Y9TXMHU61560451739683.png"
+NEWS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WoWDiscordBot/2.0",
+    "Accept-Language": "en-GB,en;q=0.9",
+}
+NEWS_TIMEOUT       = aiohttp.ClientTimeout(total=15)
+NEWS_MAX_AGE_DAYS  = 3        # anything older is treated as already covered
+NEWS_MAX_PER_RUN   = 4        # keeps a single cycle from flooding the channel
+NEWS_CACHE_SIZE    = 600      # fingerprints kept in wow_bot_data.json
+NEWS_SCHEMA        = 2        # bump to silently re-seed the dedupe cache
+NEWS_SUMMARY_CHARS = 280
+NEWS_PAGE_BYTES    = 262144   # only the <head> is needed for preview images
+NEWS_PREVIEW_CACHE = 200
 
-async def fetch_news_blizzard() -> list:
-    url = "https://worldofwarcraft.blizzard.com/en-gb/api/search/news?page=1&pageSize=8"
+ICON_WOW     = ("https://assets-bwa.worldofwarcraft.blizzard.com/static/"
+                "wow-icon-32x32.1a38d7c1c3d8df560d53f5c2ad5442c0401edf83.png")
+ICON_WOWHEAD = "https://wow.zamimg.com/apple-touch-icon.png"
+
+NEWS_SOURCES = {
+    "blizzard":    {"label": "Blizzard Official", "color": 0x00AEFF, "icon": ICON_WOW},
+    "wowhead":     {"label": "Wowhead",           "color": 0xF0A020, "icon": ICON_WOWHEAD},
+    "bluetracker": {"label": "Blue Post · EU",     "color": 0x3B82F6, "icon": ICON_WOW},
+}
+
+RSS_MEDIA_CONTENT = "{http://search.yahoo.com/mrss/}content"
+
+_TAG_RE      = re.compile(r"<[^>]+>")
+_WS_RE       = re.compile(r"\s+")
+_META_RE     = re.compile(r"<meta\b[^>]*>", re.I)
+_ATTR_RE     = re.compile(r"""([\w:.\-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+_IMG_SRC_RE  = re.compile(r"""<img[^>]+src\s*=\s*["']([^"']+)["']""", re.I)
+_BLOG_ID_RE  = re.compile(r"/(\d{7,})(?:[/-]|$)")
+_LEAD_TAG_RE = re.compile(r"^\s*\[[^\]]{1,24}\]\s*")
+_SLUG_RE     = re.compile(r"[^a-z0-9]+")
+
+_preview_cache: dict = {}
+
+
+# ─── text & url helpers ──────────────────────────────
+def plain_text(raw: str, limit: int = NEWS_SUMMARY_CHARS) -> str:
+    """HTML or RSS snippet → one clean paragraph, cut on a word boundary."""
+    if not raw:
+        return ""
+    text = html.unescape(_TAG_RE.sub(" ", raw))
+    text = _WS_RE.sub(" ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:–—-") + "…"
+
+
+def https_url(url: str) -> str:
+    """Protocol-relative and http image URLs → https; anything else is dropped."""
+    if not url:
+        return ""
+    url = url.strip()
+    if url.startswith("//"):
+        url = f"https:{url}"
+    elif url.startswith("http://"):
+        url = f"https://{url[7:]}"
+    return url if url.startswith("https://") else ""
+
+
+def parse_published(value: str):
+    """ISO 8601 (Blizzard) or RFC 2822 (RSS) → aware datetime, else None."""
+    if not value:
+        return None
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status != 200:
-                    return []
-                data = await r.json()
-                results = []
-                for item in data.get("results", [])[:8]:
-                    slug  = item.get("slug", "")
-                    title = item.get("title", "")
-                    type_ = item.get("type", {}).get("slug", "news")
-                    # Filter: only patch/hotfix/game content, skip pure marketing
-                    is_relevant = (
-                        type_ in ("patch-notes", "hotfixes", "news", "blue-tracker")
-                        or any(kw in title.lower() for kw in NEWS_KEYWORDS)
-                    )
-                    if not is_relevant:
-                        continue
-                    results.append({
-                        "title":  title,
-                        "url":    f"https://worldofwarcraft.blizzard.com/en-gb/news/{slug}",
-                        "guid":   slug,
-                        "source": "Blizzard Official",
-                        "icon":   "🔵",
-                        "color":  0x0070DD,
-                        "thumb":  item.get("thumbnail", {}).get("url") or DEFAULT_THUMB_BLIZZARD,
-                    })
-                return results
-    except Exception:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def blog_id_from_url(url: str) -> str:
+    """Blizzard blog IDs survive every mirror — the strongest dedupe key we have."""
+    match = _BLOG_ID_RE.search(url or "")
+    return match.group(1) if match else ""
+
+
+def title_key(title: str) -> str:
+    """'[EU] Tune in to WoW' and 'Tune in to WoW' collapse to the same key."""
+    text = _LEAD_TAG_RE.sub("", title or "")
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return _SLUG_RE.sub("-", text.lower()).strip("-")
+
+
+def news_fingerprints(article: dict) -> list:
+    """Every identity an article can be recognised by across all three sources."""
+    keys = []
+    if article.get("blog_id"):
+        keys.append(f"blog:{article['blog_id']}")
+    guid = article.get("guid") or article.get("url", "")
+    if guid:
+        keys.append(guid)               # legacy format — keeps old cache entries valid
+        keys.append(f"guid:{guid}")
+    slug = title_key(article.get("title", ""))
+    if slug:
+        keys.append(f"title:{slug}")
+    return keys
+
+
+def is_relevant(title: str, summary: str = "") -> bool:
+    haystack = f"{title} {summary}".lower()
+    return any(keyword in haystack for keyword in NEWS_KEYWORDS)
+
+
+# ─── http ───────────────────────────────────────
+async def fetch_text(url: str, byte_limit: int = 0) -> str:
+    async with aiohttp.ClientSession(headers=NEWS_HEADERS, timeout=NEWS_TIMEOUT) as session:
+        async with session.get(url) as response:
+            if response.status != 200:
+                raise ValueError(f"HTTP {response.status}")
+            if byte_limit:
+                raw = await response.content.read(byte_limit)
+                return raw.decode(response.charset or "utf-8", "replace")
+            return await response.text()
+
+
+def meta_image(page: str) -> str:
+    """OpenGraph / Twitter card image of an article page."""
+    wanted = ("og:image", "og:image:url", "og:image:secure_url",
+              "twitter:image", "twitter:image:src")
+    for tag in _META_RE.findall(page):
+        attrs = {}
+        for match in _ATTR_RE.finditer(tag):
+            attrs[match.group(1).lower()] = match.group(2) if match.group(2) is not None else match.group(3)
+        key = (attrs.get("property") or attrs.get("name") or "").lower()
+        if key not in wanted:
+            continue
+        content = (attrs.get("content") or "").strip()
+        # Blizzard ships an unresolved template placeholder instead of a URL.
+        if content.startswith("//") or "://" in content:
+            return content
+    return ""
+
+
+_GENERIC_IMAGE_HINTS = ("/logo", "favicon", "apple-touch-icon", "placeholder", "default-share")
+
+
+def is_generic_image(url: str) -> bool:
+    """Some sites serve their own logo as the OpenGraph image of every page."""
+    return any(hint in url.lower() for hint in _GENERIC_IMAGE_HINTS)
+
+
+def body_image(page: str) -> str:
+    """Blue Tracker mirrors Blizzard's CMS images but ships no OpenGraph tags."""
+    for src in _IMG_SRC_RE.findall(page):
+        if any(marker in src for marker in ("blog_header", "blog_thumbnail", "content_entry_media")):
+            return src
+    return ""
+
+
+async def fetch_preview_image(url: str) -> str:
+    """Preview image of an article page, cached per URL."""
+    if not url:
+        return ""
+    if url in _preview_cache:
+        return _preview_cache[url]
+    image = ""
+    try:
+        page      = await fetch_text(url, byte_limit=NEWS_PAGE_BYTES)
+        candidate = meta_image(page)
+        if not candidate or is_generic_image(candidate):
+            candidate = body_image(page) or ""
+        image = https_url(candidate)
+    except Exception as exc:
+        print(f"[WARN] Preview image failed for {url}: {exc}")
+    _preview_cache[url] = image
+    if len(_preview_cache) > NEWS_PREVIEW_CACHE:
+        _preview_cache.pop(next(iter(_preview_cache)))
+    return image
+
+
+# ─── sources ────────────────────────────────────
+async def fetch_news_blizzard() -> list:
+    """The official news page ships its article list as an embedded JSON blob."""
+    marker = '"blogList":'
+    try:
+        page  = await fetch_text(BLIZZARD_NEWS_URL)
+        start = page.find(marker)
+        if start < 0:
+            print("[WARN] Blizzard news: blogList blob not found")
+            return []
+        blob, _ = json.JSONDecoder().raw_decode(page, start + len(marker))
+    except Exception as exc:
+        print(f"[WARN] Blizzard news fetch failed: {exc}")
         return []
+
+    results = []
+    for blog in blob.get("blogs", [])[:12]:
+        title = (blog.get("title") or "").strip()
+        path  = blog.get("url") or ""
+        if not title or not path or blog.get("draft"):
+            continue
+        results.append({
+            "source":    "blizzard",
+            "title":     title,
+            "url":       f"https://worldofwarcraft.blizzard.com/en-gb{path}",
+            "guid":      f"blizzard:{blog.get('id')}",
+            "blog_id":   str(blog.get("id") or ""),
+            "summary":   plain_text(blog.get("description") or blog.get("content") or ""),
+            "image":     https_url((blog.get("image") or {}).get("url", "")),
+            "published": parse_published(blog.get("published") or ""),
+        })
+    return results
+
 
 async def fetch_news_wowhead() -> list:
-    import xml.etree.ElementTree as ET
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get("https://www.wowhead.com/news/rss", timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status != 200:
-                    return []
-                text = await r.text()
-        root    = ET.fromstring(text)
-        results = []
-        for item in root.findall(".//item")[:8]:
-            title = (item.findtext("title") or "").strip()
-            link  = (item.findtext("link")  or "").strip()
-            guid  = (item.findtext("guid")  or link).strip()
-            desc  = (item.findtext("description") or "").lower()
-            # Filter: only patch/hotfix content
-            is_relevant = any(kw in title.lower() or kw in desc for kw in NEWS_KEYWORDS)
-            if not is_relevant:
-                continue
-            if title and link:
-                results.append({
-                    "title":  title,
-                    "url":    link,
-                    "guid":   guid,
-                    "source": "Wowhead",
-                    "icon":   "📰",
-                    "color":  0xCC2200,
-                    "thumb":  DEFAULT_THUMB_WOWHEAD,
-                })
-        return results
-    except Exception:
+        text  = await fetch_text(WOWHEAD_RSS_URL)
+        items = ET.fromstring(text).findall(".//item")
+    except Exception as exc:
+        print(f"[WARN] Wowhead news fetch failed: {exc}")
         return []
 
+    results = []
+    for item in items[:20]:
+        title = (item.findtext("title") or "").strip()
+        link  = (item.findtext("link") or "").strip()
+        if not title or not link:
+            continue
+        summary = plain_text(item.findtext("description") or "")
+        if not is_relevant(title, summary):
+            continue
+        media = item.find(RSS_MEDIA_CONTENT)
+        results.append({
+            "source":    "wowhead",
+            "title":     title,
+            "url":       link,
+            "guid":      (item.findtext("guid") or link).strip(),
+            "blog_id":   "",
+            "summary":   summary,
+            "image":     https_url(media.get("url", "")) if media is not None else "",
+            "published": parse_published(item.findtext("pubDate") or ""),
+        })
+        if len(results) >= 8:
+            break
+    return results
+
+
 async def fetch_news_bluetracker() -> list:
-    import xml.etree.ElementTree as ET
+    """EU blue posts only — the US mirror of the same article is a duplicate."""
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                "https://www.bluetracker.gg/rss/wow/",
-                timeout=aiohttp.ClientTimeout(total=10),
-                headers={"User-Agent": "Mozilla/5.0 (WoW Discord Bot)"},
-            ) as r:
-                if r.status != 200:
-                    return []
-                text = await r.text()
-        root    = ET.fromstring(text)
-        results = []
-        for item in root.findall(".//item"):
-            title = (item.findtext("title") or "").strip()
-            link  = (item.findtext("link")  or "").strip()
-            guid  = (item.findtext("guid")  or link).strip()
-            # EU-only filter: URL muss "/eu-en/" enthalten ODER Titel mit "[EU]" beginnen
-            is_eu = ("/eu-en/" in link) or title.upper().startswith("[EU]")
-            if not is_eu:
-                continue
-            if title and link:
-                results.append({
-                    "title":  title,
-                    "url":    link,
-                    "guid":   guid,
-                    "source": "Bluetracker EU",
-                    "icon":   "🔷",
-                    "color":  0x3498DB,
-                    "thumb":  DEFAULT_THUMB_BLUETRACKER,
-                })
-            if len(results) >= 8:
-                break
-        return results
-    except Exception:
+        text  = await fetch_text(BLUETRACKER_RSS)
+        items = ET.fromstring(text).findall(".//item")
+    except Exception as exc:
+        print(f"[WARN] Blue Tracker fetch failed: {exc}")
         return []
+
+    results = []
+    for item in items:
+        title = (item.findtext("title") or "").strip()
+        link  = (item.findtext("link") or "").strip()
+        if not title or not link:
+            continue
+        if "/eu-en/" not in link and not title.upper().startswith("[EU]"):
+            continue
+        results.append({
+            "source":    "bluetracker",
+            "title":     _LEAD_TAG_RE.sub("", title),
+            "url":       link,
+            "guid":      (item.findtext("guid") or link).strip(),
+            "blog_id":   blog_id_from_url(link),
+            "summary":   plain_text(item.findtext("description") or ""),
+            "image":     "",
+            "published": parse_published(item.findtext("pubDate") or ""),
+        })
+        if len(results) >= 8:
+            break
+    return results
+
+
+# ─── embed ──────────────────────────────────────
+def build_news_embed(article: dict) -> discord.Embed:
+    source = NEWS_SOURCES.get(article.get("source", ""), NEWS_SOURCES["blizzard"])
+    embed  = discord.Embed(
+        title=article["title"][:250],
+        url=article["url"],
+        description=article.get("summary") or None,
+        color=source["color"],
+        timestamp=article.get("published") or datetime.now(timezone.utc),
+    )
+    embed.set_author(name=source["label"], url=article["url"], icon_url=source["icon"])
+    if article.get("image"):
+        embed.set_image(url=article["image"])
+    embed.set_footer(text="WoW News")
+    return embed
+
+
+async def collect_news() -> list:
+    """All sources merged, in source-priority order: official beats mirrors."""
+    batches = await asyncio.gather(
+        fetch_news_blizzard(),
+        fetch_news_wowhead(),
+        fetch_news_bluetracker(),
+    )
+    return [article for batch in batches for article in batch]
+
+
+def trim_seen_news():
+    global seen_news
+    if len(seen_news) > NEWS_CACHE_SIZE:
+        seen_news = seen_news[-NEWS_CACHE_SIZE:]
+
 
 # ─────────────────────────────────────────
 #  /wow check
@@ -445,11 +667,11 @@ class WowGroup(app_commands.Group):
     # ══════════════════════════════════════
     #  /wow check
     # ══════════════════════════════════════
-    @app_commands.command(name="check", description="Vollständiger Character-Check: Profil, Gear, Stats, M+, Raids, PvP, Achievements")
+    @app_commands.command(name="check", description="Full character check: profile, gear, stats, M+, raids, PvP, achievements")
     @app_commands.describe(
         name="Character Name",
-        realm="Realm (z.B. Silvermoon, Stormscale, twisting-nether)",
-        region="Region (Standard: eu)",
+        realm="Realm (e.g. Silvermoon, Stormscale, twisting-nether)",
+        region="Region (default: eu)",
     )
     @app_commands.choices(region=[
         app_commands.Choice(name="🇪🇺 EU", value="eu"),
@@ -486,8 +708,8 @@ class WowGroup(app_commands.Group):
 
         if not summary and not rio:
             return await interaction.followup.send(embed=error_embed(
-                f"**{name}** auf **{realm}-{region.upper()}** nicht gefunden.\n"
-                "Name & Realm prüfen. Character muss auf einem Retail-Server sein."
+                f"**{name}** was not found on **{realm}-{region.upper()}**.\n"
+                "Check the name and realm — the character must be on a Retail server."
             ))
 
         # ── Base info ─────────────────────────────────────────
@@ -517,51 +739,51 @@ class WowGroup(app_commands.Group):
         embeds = []
 
         # ══════════════════════════════════
-        #  EMBED 1 — PROFIL + GEAR + STATS
+        #  EMBED 1 — PROFILE + GEAR + STATS
         # ══════════════════════════════════
         e1 = discord.Embed(color=color)
         e1.set_author(
             name=f"{class_emoji}  {char_name}  —  {realm_name} ({region.upper()})",
-            icon_url=thumb_url or discord.Embed.Empty,
+            icon_url=thumb_url,
         )
         if thumb_url:
             e1.set_thumbnail(url=thumb_url)
 
-        # ── Profil ────────────────────────────────────────────
+        # ── Profile ────────────────────────────────────────────
         if summary:
             spec        = summary.get("active_spec", {}).get("name", "?")
             race        = summary.get("race",         {}).get("name", "?")
             faction     = summary.get("faction",      {}).get("name", "?")
             faction_ico = FACTION_EMOJIS.get(faction, "⚪")
             guild       = summary.get("guild",        {}).get("name", "")
-            guild_str   = f"**<{guild}>**" if guild else "*Kein Guild*"
+            guild_str   = f"**<{guild}>**" if guild else "*No guild*"
             level       = summary.get("level", "?")
             ilvl_eq     = summary.get("equipped_item_level", 0)
             ilvl_avg    = summary.get("average_item_level",  0)
             ach_pts     = summary.get("achievement_points",  0)
             readiness   = content_readiness(ilvl_eq)
 
-            last_login_str = "Unbekannt"
+            last_login_str = "Unknown"
             ts = summary.get("last_login_timestamp")
             if ts:
                 dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
                 last_login_str = f"<t:{int(dt.timestamp())}:R>"
 
-            e1.add_field(name="📋 Profil", value=(
+            e1.add_field(name="📋 Profile", value=(
                 f"{faction_ico} **{race}** {char_class} — {spec}\n"
                 f"🏛️ {guild_str}\n"
                 f"📊 Level **{level}** · iLvl **{ilvl_eq}** *(avg {ilvl_avg})*\n"
                 f"🏆 **{ach_pts:,}** Achievement Points\n"
-                f"🕒 Zuletzt online: {last_login_str}"
+                f"🕒 Last online: {last_login_str}"
             ), inline=False)
 
             e1.add_field(name="🎯 Content Readiness", value=readiness, inline=False)
 
         elif rio:
             spec = rio.get("active_spec_name", "?")
-            e1.add_field(name="📋 Profil", value=(
+            e1.add_field(name="📋 Profile", value=(
                 f"{class_emoji} **{char_class}** — {spec}\n"
-                f"*(Blizzard API nicht konfiguriert)*"
+                f"*(Blizzard API not configured)*"
             ), inline=False)
 
         # ── Gear ──────────────────────────────────────────────
@@ -591,7 +813,7 @@ class WowGroup(app_commands.Group):
                 e1.add_field(name=f"🛡️ Gear  *(Ø {avg_ilvl} iLvl)*", value="\n".join(gear_lines[:mid]), inline=True)
                 e1.add_field(name="\u200b",                            value="\n".join(gear_lines[mid:]), inline=True)
 
-        # ── Sekundärstats ─────────────────────────────────────
+        # ── Secondary stats ─────────────────────────────────────
         if statistics:
             haste    = statistics.get("haste",    {})
             crit     = statistics.get("crit",     {})
@@ -608,14 +830,14 @@ class WowGroup(app_commands.Group):
             }
             top_stat = max(stats_values, key=stats_values.get)
 
-            e1.add_field(name=f"📊 Sekundärstats  *(Hauptstat: {top_stat})*", value=(
+            e1.add_field(name=f"📊 Secondary Stats  *(highest: {top_stat})*", value=(
                 f"⚡ Haste:        **{fmt_stat(haste)}**\n"
                 f"🎯 Crit:         **{fmt_stat(crit)}**\n"
                 f"🔮 Mastery:      **{fmt_stat(mastery)}**\n"
                 f"🛡️ Versatility: **{vers_dmg:.1f}% ({vers:,})**"
             ), inline=False)
 
-        e1.set_footer(text="WoW Bot · Seite 1/4  —  Profil, Gear & Stats")
+        e1.set_footer(text="WoW Bot · Page 1/4  —  Profile, Gear & Stats")
         embeds.append(e1)
 
         # ══════════════════════════════════
@@ -624,7 +846,7 @@ class WowGroup(app_commands.Group):
         e2 = discord.Embed(color=color)
         e2.set_author(
             name=f"{class_emoji}  {char_name}  —  Mythic+ & Raids",
-            icon_url=thumb_url or discord.Embed.Empty,
+            icon_url=thumb_url,
         )
         if thumb_url:
             e2.set_thumbnail(url=thumb_url)
@@ -641,9 +863,9 @@ class WowGroup(app_commands.Group):
 
                 # Score badge
                 if all_sc >= 3000:   score_badge = "🟠 Elite"
-                elif all_sc >= 2500: score_badge = "🟣 Fortgeschritten"
-                elif all_sc >= 2000: score_badge = "🔵 Erfahren"
-                elif all_sc >= 1500: score_badge = "🟢 Aktiv"
+                elif all_sc >= 2500: score_badge = "🟣 Advanced"
+                elif all_sc >= 2000: score_badge = "🔵 Experienced"
+                elif all_sc >= 1500: score_badge = "🟢 Active"
                 elif all_sc > 0:     score_badge = "⬜ Beginner"
                 else:                score_badge = "—"
 
@@ -684,11 +906,11 @@ class WowGroup(app_commands.Group):
 
             profile_url = rio.get("profile_url")
             if profile_url:
-                e2.add_field(name="🔗 RaiderIO", value=f"[Profil ansehen]({profile_url})", inline=False)
+                e2.add_field(name="🔗 RaiderIO", value=f"[View profile]({profile_url})", inline=False)
         else:
-            e2.description = "*(RaiderIO-Daten nicht verfügbar — Character muss sich kürzlich eingeloggt haben.)*"
+            e2.description = "*(Raider.IO data unavailable — the character needs a recent login.)*"
 
-        e2.set_footer(text="WoW Bot · Seite 2/4  —  Mythic+ & Raids")
+        e2.set_footer(text="WoW Bot · Page 2/4  —  Mythic+ & Raids")
         embeds.append(e2)
 
         # ══════════════════════════════════
@@ -697,7 +919,7 @@ class WowGroup(app_commands.Group):
         e3 = discord.Embed(color=color)
         e3.set_author(
             name=f"{class_emoji}  {char_name}  —  PvP & Achievements",
-            icon_url=thumb_url or discord.Embed.Empty,
+            icon_url=thumb_url,
         )
         if thumb_url:
             e3.set_thumbnail(url=thumb_url)
@@ -730,7 +952,7 @@ class WowGroup(app_commands.Group):
             if pvp_lines:
                 e3.add_field(name="🏆 PvP Stats", value="\n\n".join(pvp_lines), inline=False)
             else:
-                e3.add_field(name="🏆 PvP Stats", value="*Keine PvP-Aktivität diese Season.*", inline=False)
+                e3.add_field(name="🏆 PvP Stats", value="*No PvP activity this season.*", inline=False)
 
         # ── Achievements ──────────────────────────────────────
         if achievements:
@@ -744,7 +966,7 @@ class WowGroup(app_commands.Group):
                 reverse=True,
             )[:8]
 
-            header = f"🏅 **{ach_pts:,} Punkte** · {total_done:,} abgeschlossen\n"
+            header = f"🏅 **{ach_pts:,} points** · {total_done:,} completed\n"
             lines  = []
             for a in recent:
                 ts    = a["completed_timestamp"]
@@ -754,12 +976,12 @@ class WowGroup(app_commands.Group):
                 lines.append(f"🏆 **{aname}** — {dts}")
 
             e3.add_field(
-                name="🎖️ Achievements  *(8 neueste)*",
+                name="🎖️ Achievements  *(8 most recent)*",
                 value=header + "\n".join(lines),
                 inline=False,
             )
 
-        e3.set_footer(text="WoW Bot · Seite 3/4  —  PvP & Achievements")
+        e3.set_footer(text="WoW Bot · Page 3/4  —  PvP & Achievements")
         embeds.append(e3)
 
         # ══════════════════════════════════
@@ -768,14 +990,14 @@ class WowGroup(app_commands.Group):
         e4 = discord.Embed(color=color)
         e4.set_author(
             name=f"{class_emoji}  {char_name}  —  Raid Logs (Warcraft Logs)",
-            icon_url=thumb_url or discord.Embed.Empty,
+            icon_url=thumb_url,
         )
         if thumb_url:
             e4.set_thumbnail(url=thumb_url)
 
         if wcl:
             zr_raw = wcl.get("zoneRankings")
-            # zoneRankings kann String (JSON) oder dict zurückgeben
+            # zoneRankings comes back as either a JSON string or a dict
             if isinstance(zr_raw, str):
                 try:    zr = json.loads(zr_raw)
                 except: zr = {}
@@ -784,7 +1006,7 @@ class WowGroup(app_commands.Group):
 
             best_avg   = zr.get("bestPerformanceAverage")
             median_avg = zr.get("medianPerformanceAverage")
-            zone_name  = (zr.get("zone") or {}).get("name") if isinstance(zr.get("zone"), dict) else zr.get("zoneName", "Aktueller Raid")
+            zone_name  = (zr.get("zone") or {}).get("name") if isinstance(zr.get("zone"), dict) else zr.get("zoneName", "Current Raid")
             difficulty = zr.get("difficulty")
             rankings   = zr.get("rankings", []) or []
 
@@ -799,9 +1021,9 @@ class WowGroup(app_commands.Group):
                     header_val = f"⚔️ **{zone_name}** — {diff_label}\n" + header_val
                 elif zone_name:
                     header_val = f"⚔️ **{zone_name}**\n" + header_val
-                e4.add_field(name="🗡️ Gesamt-Performance", value=header_val, inline=False)
+                e4.add_field(name="🗡️ Overall Performance", value=header_val, inline=False)
 
-            # Beste Parses pro Boss
+            # Best parse per boss
             if rankings:
                 lines = []
                 for r in rankings[:12]:
@@ -819,20 +1041,20 @@ class WowGroup(app_commands.Group):
                 if lines:
                     e4.add_field(name="🏆 Boss-Parses  *(Best)*", value="\n".join(lines), inline=False)
 
-            # Link zum WCL-Profil
+            # Link to the Warcraft Logs profile
             wcl_id = wcl.get("id")
             if wcl_id:
                 prof_url = f"https://www.warcraftlogs.com/character/id/{wcl_id}"
-                e4.add_field(name="🔗 Warcraft Logs", value=f"[Profil ansehen]({prof_url})", inline=False)
+                e4.add_field(name="🔗 Warcraft Logs", value=f"[View profile]({prof_url})", inline=False)
 
             if best_avg is None and not rankings:
-                e4.description = "*Keine Raid-Logs für diesen Character gefunden.*"
+                e4.description = "*No raid logs found for this character.*"
         elif not wcl_ok:
-            e4.description = "*Warcraft Logs API nicht konfiguriert (WCL_CLIENT_ID / WCL_CLIENT_SECRET in .env setzen).*"
+            e4.description = "*Warcraft Logs API not configured (set WCL_CLIENT_ID / WCL_CLIENT_SECRET in .env).*"
         else:
-            e4.description = "*Character hat keine öffentlichen Raid-Logs.*"
+            e4.description = "*This character has no public raid logs.*"
 
-        e4.set_footer(text="WoW Bot · Seite 4/4  —  Raid Logs  |  Daten: Blizzard API + RaiderIO + Warcraft Logs")
+        e4.set_footer(text="WoW Bot · Page 4/4  —  Raid Logs  |  Data: Blizzard API + Raider.IO + Warcraft Logs")
         embeds.append(e4)
 
         await interaction.followup.send(embeds=embeds)
@@ -840,13 +1062,13 @@ class WowGroup(app_commands.Group):
     # ══════════════════════════════════════
     #  /wow compare
     # ══════════════════════════════════════
-    @app_commands.command(name="compare", description="Zwei Characters vergleichen")
+    @app_commands.command(name="compare", description="Compare two characters side by side")
     @app_commands.describe(
-        name1="Erster Character",
-        realm1="Realm des ersten Characters",
-        name2="Zweiter Character",
-        realm2="Realm des zweiten Characters",
-        region="Region (Standard: eu)",
+        name1="First character",
+        realm1="Realm of the first character",
+        name2="Second character",
+        realm2="Realm of the second character",
+        region="Region (default: eu)",
     )
     @app_commands.choices(region=[
         app_commands.Choice(name="🇪🇺 EU", value="eu"),
@@ -882,9 +1104,9 @@ class WowGroup(app_commands.Group):
             )
 
         if not s1 and not rio1:
-            return await interaction.followup.send(embed=error_embed(f"**{name1}** auf **{realm1}** nicht gefunden."))
+            return await interaction.followup.send(embed=error_embed(f"**{name1}** was not found on **{realm1}**."))
         if not s2 and not rio2:
-            return await interaction.followup.send(embed=error_embed(f"**{name2}** auf **{realm2}** nicht gefunden."))
+            return await interaction.followup.send(embed=error_embed(f"**{name2}** was not found on **{realm2}**."))
 
         def char_info(s, rio, name, realm):
             cn     = s.get("name", name.capitalize())  if s   else (rio or {}).get("name", name.capitalize())
@@ -923,7 +1145,7 @@ class WowGroup(app_commands.Group):
                 f"iLvl: **{ilvl1}** {win(ilvl1, ilvl2)}\n"
                 f"M+ Score: **{mp1:.0f}** {win(mp1, mp2)}\n"
                 f"Achievements: **{ach1:,}** {win(ach1, ach2)}\n"
-                f"Zuletzt: {last1}"
+                f"Last seen: {last1}"
             ),
             inline=True,
         )
@@ -934,7 +1156,7 @@ class WowGroup(app_commands.Group):
                 f"iLvl: **{ilvl2}** {win(ilvl2, ilvl1)}\n"
                 f"M+ Score: **{mp2:.0f}** {win(mp2, mp1)}\n"
                 f"Achievements: **{ach2:,}** {win(ach2, ach1)}\n"
-                f"Zuletzt: {last2}"
+                f"Last seen: {last2}"
             ),
             inline=True,
         )
@@ -956,20 +1178,20 @@ class WowGroup(app_commands.Group):
                     f"{cn1}: **{m1}/{nt}** {win(m1,m2)}  ·  {cn2}: **{m2}/{nt}** {win(m2,m1)}"
                 )
             if raid_lines:
-                embed.add_field(name="🏰 Raid Mythic Vergleich", value="\n\n".join(raid_lines), inline=False)
+                embed.add_field(name="🏰 Mythic Raid Comparison", value="\n\n".join(raid_lines), inline=False)
 
         # Overall winner
         score1 = (ilvl1 / 700 * 40) + (mp1 / 3500 * 40) + (ach1 / 50000 * 20)
         score2 = (ilvl2 / 700 * 40) + (mp2 / 3500 * 40) + (ach2 / 50000 * 20)
         if score1 > score2 + 1:
-            winner = f"🏆 **{cn1}** gewinnt den Vergleich!"
+            winner = f"🏆 **{cn1}** wins the comparison!"
         elif score2 > score1 + 1:
-            winner = f"🏆 **{cn2}** gewinnt den Vergleich!"
+            winner = f"🏆 **{cn2}** wins the comparison!"
         else:
-            winner = "🟡 Zu knapp — kein klarer Gewinner!"
-        embed.add_field(name="🎯 Gesamtbewertung", value=winner, inline=False)
+            winner = "🟡 Too close to call — no clear winner!"
+        embed.add_field(name="🎯 Overall Verdict", value=winner, inline=False)
 
-        embed.set_footer(text=f"WoW Bot · /wow compare · {region.upper()}  |  Daten: Blizzard API + RaiderIO")
+        embed.set_footer(text=f"WoW Bot · /wow compare · {region.upper()}  |  Data: Blizzard API + Raider.IO")
         await interaction.followup.send(embed=embed)
 
 
@@ -978,87 +1200,87 @@ class WowGroup(app_commands.Group):
 # ─────────────────────────────────────────
 class WowSetupGroup(app_commands.Group):
     def __init__(self):
-        super().__init__(name="wowsetup", description="WoW Bot Channels konfigurieren (nur Admins)")
+        super().__init__(name="wowsetup", description="Configure the WoW bot channels (admins only)")
         self.default_member_permissions = discord.Permissions(administrator=True)
 
-    @app_commands.command(name="news_channel", description="Channel für WoW News & Patch Notes setzen")
-    @app_commands.describe(channel_id="Channel ID (Rechtsklick → ID kopieren)")
+    @app_commands.command(name="news_channel", description="Set the channel for WoW news & patch notes")
+    @app_commands.describe(channel_id="Channel ID (right-click → Copy ID)")
     async def set_news(self, interaction: discord.Interaction, channel_id: str):
         global news_channel_id
         if not is_admin(interaction):
-            return await interaction.response.send_message(embed=error_embed("Nur für Admins."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed("Administrators only."), ephemeral=True)
         try:    cid = int(channel_id)
-        except: return await interaction.response.send_message(embed=error_embed("Ungültige Channel ID."), ephemeral=True)
+        except: return await interaction.response.send_message(embed=error_embed("Invalid channel ID."), ephemeral=True)
         ch = interaction.guild.get_channel(cid)
         if not ch:
-            return await interaction.response.send_message(embed=error_embed(f"Channel `{cid}` nicht gefunden."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed(f"Channel `{cid}` was not found."), ephemeral=True)
         news_channel_id = cid
         save_data()
         embed = discord.Embed(
-            title="✅  News Channel gesetzt",
-            description=f"📰  WoW News & Patch Notes werden ab jetzt in <#{cid}> gepostet.",
+            title="✅  News Channel Set",
+            description=f"📰  WoW news & patch notes will now be posted in <#{cid}>.",
             color=0x00FF98,
         )
-        embed.set_footer(text="WoW Bot  ·  Setup erfolgreich")
+        embed.set_footer(text="WoW Bot  ·  Setup complete")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="reset_channel", description="Channel für Weekly Reset Reminders setzen")
+    @app_commands.command(name="reset_channel", description="Set the channel for weekly reset reminders")
     @app_commands.describe(channel_id="Channel ID")
     async def set_reset(self, interaction: discord.Interaction, channel_id: str):
         global reset_channel_id
         if not is_admin(interaction):
-            return await interaction.response.send_message(embed=error_embed("Nur für Admins."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed("Administrators only."), ephemeral=True)
         try:    cid = int(channel_id)
-        except: return await interaction.response.send_message(embed=error_embed("Ungültige Channel ID."), ephemeral=True)
+        except: return await interaction.response.send_message(embed=error_embed("Invalid channel ID."), ephemeral=True)
         ch = interaction.guild.get_channel(cid)
         if not ch:
-            return await interaction.response.send_message(embed=error_embed(f"Channel `{cid}` nicht gefunden."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed(f"Channel `{cid}` was not found."), ephemeral=True)
         reset_channel_id = cid
         save_data()
         embed = discord.Embed(
-            title="✅  Reset Channel gesetzt",
-            description=f"🔄  Weekly Reset Reminders werden ab jetzt in <#{cid}> gepostet.",
+            title="✅  Reset Channel Set",
+            description=f"🔄  Weekly reset reminders will now be posted in <#{cid}>.",
             color=0x00FF98,
         )
-        embed.set_footer(text="WoW Bot  ·  Setup erfolgreich")
+        embed.set_footer(text="WoW Bot  ·  Setup complete")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="maint_channel", description="Channel für Maintenance Warnungen setzen")
+    @app_commands.command(name="maint_channel", description="Set the channel for maintenance alerts")
     @app_commands.describe(channel_id="Channel ID")
     async def set_maint(self, interaction: discord.Interaction, channel_id: str):
         global maint_channel_id
         if not is_admin(interaction):
-            return await interaction.response.send_message(embed=error_embed("Nur für Admins."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed("Administrators only."), ephemeral=True)
         try:    cid = int(channel_id)
-        except: return await interaction.response.send_message(embed=error_embed("Ungültige Channel ID."), ephemeral=True)
+        except: return await interaction.response.send_message(embed=error_embed("Invalid channel ID."), ephemeral=True)
         ch = interaction.guild.get_channel(cid)
         if not ch:
-            return await interaction.response.send_message(embed=error_embed(f"Channel `{cid}` nicht gefunden."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed(f"Channel `{cid}` was not found."), ephemeral=True)
         maint_channel_id = cid
         save_data()
         embed = discord.Embed(
-            title="✅  Maintenance Channel gesetzt",
-            description=f"🔧  Maintenance-Warnungen werden ab jetzt in <#{cid}> gepostet.",
+            title="✅  Maintenance Channel Set",
+            description=f"🔧  Maintenance alerts will now be posted in <#{cid}>.",
             color=0x00FF98,
         )
-        embed.set_footer(text="WoW Bot  ·  Setup erfolgreich")
+        embed.set_footer(text="WoW Bot  ·  Setup complete")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="overview", description="Aktuelle WoW Bot Konfiguration anzeigen")
+    @app_commands.command(name="overview", description="Show the current WoW bot configuration")
     async def overview(self, interaction: discord.Interaction):
         if not is_admin(interaction):
-            return await interaction.response.send_message(embed=error_embed("Nur für Admins."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed("Administrators only."), ephemeral=True)
 
         def channel_line(cid):
-            return f"✅  <#{cid}>" if cid else "⚠️  *Nicht gesetzt*"
+            return f"✅  <#{cid}>" if cid else "⚠️  *Not set*"
 
-        blizzard_status = "✅ Konfiguriert" if (BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET) else "❌ Fehlt"
-        wcl_status      = "✅ Konfiguriert" if (WCL_CLIENT_ID and WCL_CLIENT_SECRET)           else "❌ Fehlt"
+        blizzard_status = "✅ Configured" if (BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET) else "❌ Missing"
+        wcl_status      = "✅ Configured" if (WCL_CLIENT_ID and WCL_CLIENT_SECRET)           else "❌ Missing"
 
         embed = discord.Embed(
-            title="⚙️  WoW Bot  —  Konfigurationsübersicht",
+            title="⚙️  WoW Bot  —  Configuration Overview",
             description=(
-                "Aktueller Setup-Status aller Channels, APIs und News-Quellen.\n"
+                "Current setup status of all channels, APIs and news sources.\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=0x00FF98,
@@ -1069,7 +1291,7 @@ class WowSetupGroup(app_commands.Group):
         embed.add_field(name="🔄  Reset Channel",       value=channel_line(reset_channel_id), inline=True)
         embed.add_field(name="🔧  Maintenance Channel", value=channel_line(maint_channel_id), inline=True)
         embed.add_field(
-            name="🔑  API-Status",
+            name="🔑  API Status",
             value=(
                 f"🟦  Blizzard API: **{blizzard_status}**\n"
                 f"🟥  Warcraft Logs: **{wcl_status}**"
@@ -1077,17 +1299,35 @@ class WowSetupGroup(app_commands.Group):
             inline=False,
         )
         embed.add_field(
-            name="📡  Aktive News-Quellen",
+            name="📡  Active News Sources",
             value=(
-                "🔵  **Blizzard Official**  —  Patch Notes & offizielle News\n"
-                "📰  **Wowhead**  —  Datamines & Hotfixes\n"
-                "🔷  **Bluetracker**  —  Blue Posts *(EU-gefiltert)*\n"
-                "*Nur Patch- & Content-relevante Artikel werden gepostet.*"
+                "🔵  **Blizzard Official**  —  patch notes & official news\n"
+                "📰  **Wowhead**  —  datamines & hotfixes *(filtered)*\n"
+                "🔷  **Blue Posts**  —  Blizzard forum replies *(EU only)*\n"
+                "*Articles mirrored across sources are posted only once.*"
             ),
             inline=False,
         )
-        embed.set_footer(text="WoW Bot  ·  Setup Overview  ·  Nur für Admins sichtbar")
+        embed.set_footer(text="WoW Bot  ·  Setup Overview  ·  Visible to admins only")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="news_test", description="Preview the latest news post without publishing it")
+    async def news_test(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            return await interaction.response.send_message(embed=error_embed("Administrators only."), ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        articles = await collect_news()
+        if not articles:
+            return await interaction.followup.send(
+                embed=error_embed("No news source returned an article right now."), ephemeral=True
+            )
+
+        oldest  = datetime.min.replace(tzinfo=timezone.utc)
+        article = max(articles, key=lambda a: a.get("published") or oldest)
+        if not article.get("image"):
+            article["image"] = await fetch_preview_image(article["url"])
+        await interaction.followup.send(embed=build_news_embed(article), ephemeral=True)
 
 
 # ─────────────────────────────────────────
@@ -1096,46 +1336,54 @@ class WowSetupGroup(app_commands.Group):
 
 @tasks.loop(hours=1)
 async def check_wow_news():
-    global seen_news
+    global seen_news, news_schema
+
     if not news_channel_id:
         return
     channel = bot.get_channel(news_channel_id)
     if not channel:
         return
 
-    blizzard_articles, wowhead_articles, bluetracker_articles = await asyncio.gather(
-        fetch_news_blizzard(),
-        fetch_news_wowhead(),
-        fetch_news_bluetracker(),
-    )
+    articles = await collect_news()
+    cutoff   = datetime.now(timezone.utc) - timedelta(days=NEWS_MAX_AGE_DAYS)
 
-    for article in blizzard_articles + wowhead_articles + bluetracker_articles:
-        uid = article.get("guid", article.get("url", ""))
-        if not uid or uid in seen_news:
+    known   = set(seen_news)
+    pending = []
+    for article in articles:
+        published = article.get("published")
+        if published is not None and published < cutoff:
             continue
+        keys = news_fingerprints(article)
+        if known.intersection(keys):
+            continue
+        # Claim the keys right away so a mirror of the same story further down
+        # this very batch cannot slip through behind the first copy.
+        known.update(keys)
+        pending.append((article, keys))
 
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        embed = discord.Embed(
-            title=article["title"],
-            url=article["url"],
-            color=article.get("color", 0x0070DD),
-            description=f"{article['icon']}  **{article['source']}**  ·  <t:{now_ts}:R>",
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.set_author(name=f"📢  WoW News Alert  —  {article['source']}")
-        if article.get("thumb"):
-            embed.set_thumbnail(url=article["thumb"])
-        embed.set_footer(text="WoW Bot  ·  Automatischer News-Post  ·  Patch- & Content-Updates")
+    # First run on the new dedupe format: learn what is already out there and
+    # post nothing, so an update never dumps a wall of back-dated articles.
+    if news_schema < NEWS_SCHEMA:
+        for _, keys in pending:
+            seen_news.extend(keys)
+        news_schema = NEWS_SCHEMA
+        trim_seen_news()
+        save_data()
+        print(f"[INFO] News cache seeded with {len(pending)} articles — nothing posted this run")
+        return
 
+    for article, keys in pending[:NEWS_MAX_PER_RUN]:
+        if not article.get("image"):
+            article["image"] = await fetch_preview_image(article["url"])
         try:
-            await channel.send(embed=embed)
-            seen_news.append(uid)
-            if len(seen_news) > 200:
-                seen_news = seen_news[-200:]
-            save_data()
-            print(f"[WOW] News: {article['title']}")
-        except Exception as e:
-            print(f"[ERROR] News-Post fehlgeschlagen: {e}")
+            await channel.send(embed=build_news_embed(article))
+        except Exception as exc:
+            print(f"[ERROR] News post failed: {exc}")
+            continue
+        seen_news.extend(keys)
+        trim_seen_news()
+        save_data()
+        print(f"[INFO] News posted: {article['title']}")
 
 
 @tasks.loop(minutes=30)
@@ -1152,11 +1400,11 @@ async def weekly_reset_reminder():
         eu_ts = int(now.replace(hour=7,  minute=0, second=0, microsecond=0).timestamp())
         us_ts = int(now.replace(hour=15, minute=0, second=0, microsecond=0).timestamp())
         embed = discord.Embed(
-            title="⏰  Weekly Reset  —  Noch 3 Stunden!",
+            title="⏰  Weekly Reset  —  3 Hours To Go!",
             color=0xFFD700,
             description=(
-                "🔔  **Der Weekly Reset steht kurz bevor!**\n"
-                "Zeit, noch schnell die wichtigsten Wochenziele abzuhaken.\n"
+                "🔔  **The weekly reset is right around the corner.**\n"
+                "Last chance to tick off this week's most important goals.\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             ),
             timestamp=datetime.now(timezone.utc),
@@ -1174,28 +1422,28 @@ async def weekly_reset_reminder():
         )
         embed.add_field(name="​", value="​", inline=False)
         embed.add_field(
-            name="📋  Endgame-Checkliste",
+            name="📋  Endgame Checklist",
             value=(
-                "🏆  Great Vault öffnen *(M+, Raid, PvP)*\n"
-                "⚔️  Wöchentliche Raidbosse\n"
-                "🗺️  World Quests & Weekly Quests\n"
-                "🎯  PvP Conquest Cap\n"
-                "🕳️  Delves & World Bosse"
+                "🏆  Open the Great Vault *(M+, raid, PvP)*\n"
+                "⚔️  Weekly raid bosses\n"
+                "🗺️  World quests & weekly quests\n"
+                "🎯  PvP conquest cap\n"
+                "🕳️  Delves & world bosses"
             ),
             inline=True,
         )
         embed.add_field(
             name="💰  Gold & Gear",
             value=(
-                "💎  Catchup-Gear von Weekly Events\n"
-                "🪙  Professions Weekly Crafts\n"
-                "📦  Wöchentliche Questbelohnungen\n"
-                "🎁  Trading Post Bounty\n"
-                "🏛️  Reputationen auffüllen"
+                "💎  Catch-up gear from weekly events\n"
+                "🪙  Weekly profession crafts\n"
+                "📦  Weekly quest rewards\n"
+                "🎁  Trading Post bounty\n"
+                "🏛️  Top up your reputations"
             ),
             inline=True,
         )
-        embed.set_footer(text="WoW Bot  ·  Weekly Reset Reminder  ·  Viel Erfolg bei den Wochenzielen!")
+        embed.set_footer(text="WoW Bot  ·  Weekly Reset Reminder  ·  Good luck with this week's goals!")
         await channel.send(embed=embed)
 
 
@@ -1230,13 +1478,13 @@ async def check_maintenance():
             return
 
         status_map = {
-            "maintenance":    ("🔧  Scheduled Maintenance", 0xFFD700, "🟡 Geplant",     "Der Dienst wird planmäßig gewartet. Logins können zeitweise fehlschlagen."),
-            "partial_outage": ("⚠️  Partial Outage",        0xFF8000, "🟠 Eingeschränkt", "Teilweise Störung — einige Funktionen sind aktuell nicht verfügbar."),
-            "major_outage":   ("🔴  Major Outage",          0xC41E3A, "🔴 Kritisch",    "Schwerwiegende Störung — der Dienst ist aktuell nicht erreichbar."),
+            "maintenance":    ("🔧  Scheduled Maintenance", 0xFFD700, "🟡 Planned",  "The service is undergoing scheduled maintenance. Logins may fail temporarily."),
+            "partial_outage": ("⚠️  Partial Outage",        0xFF8000, "🟠 Degraded", "Partial disruption — some features are currently unavailable."),
+            "major_outage":   ("🔴  Major Outage",          0xC41E3A, "🔴 Critical", "Major disruption — the service is currently unreachable."),
         }
         title, color, severity, info = status_map.get(
             status,
-            ("⚠️  Service Issue", 0xFF8000, "🟠 Warnung", "Unerwarteter Service-Status gemeldet."),
+            ("⚠️  Service Issue", 0xFF8000, "🟠 Warning", "An unexpected service status was reported."),
         )
         embed = discord.Embed(
             title=f"{title}  —  World of Warcraft",
@@ -1252,11 +1500,11 @@ async def check_maintenance():
         embed.add_field(name="⚡  Severity",  value=severity,                         inline=True)
         embed.add_field(name="🎮  Service",   value="World of Warcraft",              inline=True)
         embed.add_field(
-            name="🔗  Weitere Infos",
-            value="[📄 Offizielle Status-Seite](https://us.battle.net/support/en/article/service-status)",
+            name="🔗  More Info",
+            value="[📄 Official status page](https://us.battle.net/support/en/article/service-status)",
             inline=False,
         )
-        embed.set_footer(text="WoW Bot  ·  Blizzard Service Status  ·  Überprüfung alle 4h")
+        embed.set_footer(text="WoW Bot  ·  Blizzard Service Status  ·  Checked every 4h")
         await channel.send(embed=embed)
     except Exception as e:
         print(f"[ERROR] Maintenance check: {e}")
@@ -1273,8 +1521,8 @@ async def sync_commands(ctx):
     bot.tree.add_command(WowGroup())
     bot.tree.add_command(WowSetupGroup())
     synced = await bot.tree.sync()
-    await ctx.send(f"✅ {len(synced)} Slash Commands gesynct!", delete_after=5)
-    print(f"[INFO] Manuell gesynct von {ctx.author}: {len(synced)} Commands")
+    await ctx.send(f"✅ Synced {len(synced)} slash commands!", delete_after=5)
+    print(f"[INFO] Manual sync by {ctx.author}: {len(synced)} commands")
 
 
 @bot.event
@@ -1292,11 +1540,11 @@ async def on_ready():
     print(f"[INFO] Blizzard API       : {'Configured ✓' if BLIZZARD_CLIENT_ID else 'NOT SET ✗'}")
     print(f"[INFO] Warcraft Logs API  : {'Configured ✓' if WCL_CLIENT_ID else 'NOT SET ✗'}")
     print(f"[INFO] Commands           : /wow check · /wow compare · /wowsetup")
-    print(f"[INFO] News-Quellen       : Blizzard Official + Wowhead + Bluetracker (EU)")
-    print(f"[INFO] News channel       : {news_channel_id  or 'Nicht gesetzt'}")
-    print(f"[INFO] Reset channel      : {reset_channel_id or 'Nicht gesetzt'}")
-    print(f"[INFO] Maint channel      : {maint_channel_id or 'Nicht gesetzt'}")
-    print(f"[INFO] Background tasks   : Gestartet")
+    print(f"[INFO] News sources       : Blizzard Official + Wowhead + Blue Posts (EU)")
+    print(f"[INFO] News channel       : {news_channel_id  or 'Not set'}")
+    print(f"[INFO] Reset channel      : {reset_channel_id or 'Not set'}")
+    print(f"[INFO] Maint channel      : {maint_channel_id or 'Not set'}")
+    print(f"[INFO] Background tasks   : Started")
     print(f"[INFO] Slash commands     : Synced")
 
 
@@ -1305,7 +1553,7 @@ async def on_ready():
 # ─────────────────────────────────────────
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        raise RuntimeError("[ERROR] Kein DISCORD_TOKEN in der .env!")
+        raise RuntimeError("[ERROR] DISCORD_TOKEN is missing from .env!")
     if not BLIZZARD_CLIENT_ID or not BLIZZARD_CLIENT_SECRET:
-        print("[WARNING] Keine Blizzard Credentials — Profil/Gear/Stats/PvP/Achievements fehlen!")
+        print("[WARNING] No Blizzard credentials — profile/gear/stats/PvP/achievements will be missing!")
     bot.run(DISCORD_TOKEN)
