@@ -377,8 +377,8 @@ _WS_RE       = re.compile(r"\s+")
 _META_RE     = re.compile(r"<meta\b[^>]*>", re.I)
 _ATTR_RE     = re.compile(r"""([\w:.\-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 _IMG_SRC_RE  = re.compile(r"""<img[^>]+src\s*=\s*["']([^"']+)["']""", re.I)
-_BLOG_ID_RE  = re.compile(r"/(\d{7,})(?:[/-]|$)")
-_LEAD_TAG_RE = re.compile(r"^\s*\[[^\]]{1,24}\]\s*")
+_BLOG_ID_RE  = re.compile(r"/(\d{8,})(?:[/-]|$)")
+_LEAD_TAG_RE = re.compile(r"^\s*\[[^\]]{1,40}\]\s*")
 _SLUG_RE     = re.compile(r"[^a-z0-9]+")
 
 _preview_cache: dict = {}
@@ -409,24 +409,29 @@ def https_url(url: str) -> str:
 
 
 def parse_published(value: str):
-    """ISO 8601 (Blizzard) or RFC 2822 (RSS) → aware datetime, else None."""
+    """ISO 8601 (Blizzard) or RFC 2822 (RSS) → aware UTC datetime, else None."""
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError):
-        pass
-    try:
-        parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
     if parsed is None:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    # A feed that omits the offset means UTC. astimezone() on a naive value
+    # would read it as the host's local time and shift the age cutoff.
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def blog_id_from_url(url: str) -> str:
-    """Blizzard blog IDs survive every mirror — the strongest dedupe key we have."""
+    """A Blizzard blog ID survives every mirror, so it is the strongest key we
+    have. Blue Tracker reuses it verbatim for blog mirrors but numbers its own
+    forum topics far lower, hence the 8-digit floor."""
     match = _BLOG_ID_RE.search(url or "")
     return match.group(1) if match else ""
 
@@ -438,18 +443,44 @@ def title_key(title: str) -> str:
     return _SLUG_RE.sub("-", text.lower()).strip("-")
 
 
-def news_fingerprints(article: dict) -> list:
-    """Every identity an article can be recognised by across all three sources."""
+def title_fingerprint(article: dict, day_offset: int = 0) -> str:
+    """Blue posts reuse titles for weeks ("Realm Restarts"), so a title only
+    identifies an article together with the day it was published on."""
+    slug = title_key(article.get("title", ""))
+    if not slug:
+        return ""
+    published = article.get("published")
+    if published is None:
+        return f"title:{slug}"
+    return f"title:{slug}:{(published + timedelta(days=day_offset)).date().isoformat()}"
+
+
+def stored_fingerprints(article: dict) -> list:
+    """The identities of an article as they are written to the cache."""
     keys = []
     if article.get("blog_id"):
         keys.append(f"blog:{article['blog_id']}")
     guid = article.get("guid") or article.get("url", "")
     if guid:
-        keys.append(guid)               # legacy format — keeps old cache entries valid
         keys.append(f"guid:{guid}")
-    slug = title_key(article.get("title", ""))
-    if slug:
-        keys.append(f"title:{slug}")
+    title = title_fingerprint(article)
+    if title:
+        keys.append(title)
+    return keys
+
+
+def lookup_fingerprints(article: dict) -> list:
+    """Everything worth testing against the cache, including looser matches:
+    a mirror can land either side of midnight from the original, and bare
+    guids are what the cache held before fingerprints existed."""
+    keys = stored_fingerprints(article)
+    guid = article.get("guid") or article.get("url", "")
+    if guid:
+        keys.append(guid)
+    for offset in (-1, 1):
+        neighbour = title_fingerprint(article, offset)
+        if neighbour:
+            keys.append(neighbour)
     return keys
 
 
@@ -1351,11 +1382,15 @@ async def check_wow_news():
     pending = []
     for article in articles:
         published = article.get("published")
-        if published is not None and published < cutoff:
+        if published is None:
+            # Undated articles still get posted — going silent on a feed format
+            # change would be worse — but the cutoff cannot vouch for them.
+            print(f"[WARN] No publish date on: {article['title'][:80]}")
+        elif published < cutoff:
             continue
-        keys = news_fingerprints(article)
-        if known.intersection(keys):
+        if known.intersection(lookup_fingerprints(article)):
             continue
+        keys = stored_fingerprints(article)
         # Claim the keys right away so a mirror of the same story further down
         # this very batch cannot slip through behind the first copy.
         known.update(keys)
