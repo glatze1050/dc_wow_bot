@@ -322,6 +322,63 @@ def icon_url_variants(url: str) -> list:
     return variants
 
 
+STAT_SHORT = {
+    "Strength": "Str", "Agility": "Agi", "Intellect": "Int", "Stamina": "Sta",
+    "Critical Strike": "Crit", "Versatility": "Vers", "Haste": "Haste", "Mastery": "Mastery",
+}
+
+
+def item_stat_line(item: dict) -> str:
+    """Every stat the tooltip shows, minus the ones flagged as off-spec."""
+    parts = []
+    for stat in item.get("stats", []):
+        if stat.get("is_negated"):
+            continue
+        text = ((stat.get("display") or {}).get("display_string") or "").strip()
+        if not text:
+            continue
+        for long_name, short in STAT_SHORT.items():
+            if text.endswith(long_name):
+                text = text[: -len(long_name)] + short
+                break
+        parts.append(text)
+    return " · ".join(parts)
+
+
+def build_item_fields(equipment: dict) -> list:
+    """One tooltip-shaped field per equipped item, in paper-doll order."""
+    items  = {i["slot"]["type"]: i for i in equipment.get("equipped_items", [])}
+    fields = []
+    for slot_type in SLOT_ORDER:
+        item = items.get(slot_type)
+        if not item:
+            continue
+        slot_name = (item.get("slot") or {}).get("name") or slot_type.title()
+        ilvl      = (item.get("level") or {}).get("value", 0)
+        quality   = (item.get("quality") or {}).get("type", "COMMON")
+        track     = ((item.get("name_description") or {}).get("display_string") or "").strip()
+
+        header = f"{QUALITY_ICONS.get(quality, '⚪')} {slot_name}  ·  {ilvl}"
+        if track:
+            header += f"  ·  {track}"
+
+        lines = [f"**{item.get('name', 'Unknown')}**"]
+        stats = item_stat_line(item)
+        if stats:
+            lines.append(stats)
+        for ench in item.get("enchantments", []):
+            label = enchant_label(ench.get("display_string", ""))
+            if label:
+                lines.append(f"✨ {label}")
+        for socket in item.get("sockets", []):
+            bonus = plain_display(socket.get("display_string", ""))
+            if bonus:
+                lines.append(f"💎 {bonus}")
+
+        fields.append((header[:256], "\n".join(lines)[:1024]))
+    return fields
+
+
 def secondary_stat_line(item: dict) -> str:
     """'+79 Haste · +112 Vers' — off-spec stats are flagged and left out."""
     found = []
@@ -466,7 +523,6 @@ async def build_gear_slots(equipment: dict, region: str):
             "label":    label,
             "name":     item.get("name", ""),
             "ilvl":     ilvl,
-            "stats":    secondary_stat_line(item),
             "quality":  (item.get("quality") or {}).get("type", "COMMON"),
             "icon":     icons.get((item.get("item") or {}).get("id")),
             "enchants": enchants,
@@ -1111,11 +1167,10 @@ class WowGroup(app_commands.Group):
                 if lines_out[half:]:
                     e1.add_field(name="​", value="\n".join(lines_out[half:]), inline=True)
 
-            shown = (enchant_lines + gem_lines)[:12]
-            if shown:
+            if enchant_lines or gem_lines:
                 e1.add_field(
-                    name=f"✨ Enchants & Gems  *({len(enchant_lines)} enchanted · {len(gem_lines)} gems)*",
-                    value="\n".join(shown)[:1024],
+                    name="✨ Enchants & Gems",
+                    value=f"{len(enchant_lines)} enchanted · {len(gem_lines)} gems — details on the next page",
                     inline=False,
                 )
 
@@ -1143,8 +1198,19 @@ class WowGroup(app_commands.Group):
                 f"🛡️ Versatility: **{vers_dmg:.1f}% ({vers:,})**"
             ), inline=False)
 
-        e1.set_footer(text="WoW Bot · Page 1/4  —  Profile, Gear & Stats")
+        e1.set_footer(text="WoW Bot · Page 1/5  —  Profile, Gear & Stats")
         embeds.append(e1)
+
+        # ══════════════════════════════════
+        #  EMBED 2 — ITEM DETAILS
+        # ══════════════════════════════════
+        if equipment:
+            e_items = discord.Embed(color=color)
+            e_items.set_author(name=f"{class_emoji}  {char_name}  —  Items", icon_url=thumb_url)
+            for field_name, field_value in build_item_fields(equipment)[:24]:
+                e_items.add_field(name=field_name, value=field_value, inline=False)
+            e_items.set_footer(text="WoW Bot · Page 2/5  —  Item Details")
+            embeds.append(e_items)
 
         # ══════════════════════════════════
         #  EMBED 2 — M+ + RAIDS
@@ -1216,7 +1282,7 @@ class WowGroup(app_commands.Group):
         else:
             e2.description = "*(Raider.IO data unavailable — the character needs a recent login.)*"
 
-        e2.set_footer(text="WoW Bot · Page 2/4  —  Mythic+ & Raids")
+        e2.set_footer(text="WoW Bot · Page 3/5  —  Mythic+ & Raids")
         embeds.append(e2)
 
         # ══════════════════════════════════
@@ -1287,7 +1353,7 @@ class WowGroup(app_commands.Group):
                 inline=False,
             )
 
-        e3.set_footer(text="WoW Bot · Page 3/4  —  PvP & Achievements")
+        e3.set_footer(text="WoW Bot · Page 4/5  —  PvP & Achievements")
         embeds.append(e3)
 
         # ══════════════════════════════════
@@ -1360,7 +1426,7 @@ class WowGroup(app_commands.Group):
         else:
             e4.description = "*This character has no public raid logs.*"
 
-        e4.set_footer(text="WoW Bot · Page 4/4  —  Raid Logs  |  Data: Blizzard API + Raider.IO + Warcraft Logs")
+        e4.set_footer(text="WoW Bot · Page 5/5  —  Raid Logs  |  Data: Blizzard API + Raider.IO + Warcraft Logs")
         embeds.append(e4)
 
         await interaction.followup.send(embeds=embeds, files=attachments or discord.utils.MISSING)

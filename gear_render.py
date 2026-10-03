@@ -32,7 +32,7 @@ BORDER   = 3
 
 LEFT_X       = PADDING
 RIGHT_X      = WIDTH - PADDING - ICON
-PORTRAIT_BOX = (320, HEADER_H + 10, 820, HEADER_H + 10 + 8 * ROW_STEP - 10)
+PORTRAIT_BOX = (260, HEADER_H + 10, 880, HEADER_H + 10 + 8 * ROW_STEP - 10)
 
 # Matches the Discord dark embed background so the image reads as one block.
 BG          = (43, 45, 49)
@@ -113,7 +113,7 @@ def _open_icon(raw: bytes, size: int):
     return image
 
 
-def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, fonts: dict, room: int):
+def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, fonts: dict):
     """One item: icon, quality border, item level, slot name, enchant, gems."""
     colour = QUALITY_COLORS.get(slot.get("quality") or "COMMON", QUALITY_COLORS["COMMON"])
 
@@ -133,24 +133,17 @@ def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, font
     ilvl  = slot.get("ilvl")
     label = str(ilvl) if ilvl else "—"
     slot_label = slot.get("label", "")
-    text_y  = y + 8
-    name_y  = text_y + 24
-    stats_y = name_y + 22
-    stats   = _fit(draw, slot.get("stats", ""), fonts["stats"], room)
+    text_y = y + 14
+    name_y = text_y + 26
 
     if align_right:
         draw.text((x - 10 - _text_width(draw, label, fonts["ilvl"]), text_y),
                   label, font=fonts["ilvl"], fill=colour)
         draw.text((x - 10 - _text_width(draw, slot_label, fonts["slot"]), name_y),
                   slot_label, font=fonts["slot"], fill=TEXT_DIM)
-        if stats:
-            draw.text((x - 10 - _text_width(draw, stats, fonts["stats"]), stats_y),
-                      stats, font=fonts["stats"], fill=TEXT_FAINT)
     else:
         draw.text((x + ICON + 10, text_y), label, font=fonts["ilvl"], fill=colour)
         draw.text((x + ICON + 10, name_y), slot_label, font=fonts["slot"], fill=TEXT_DIM)
-        if stats:
-            draw.text((x + ICON + 10, stats_y), stats, font=fonts["stats"], fill=TEXT_FAINT)
 
     # Enchanted items get the same green marker the character sheet uses.
     if slot.get("enchants"):
@@ -202,8 +195,7 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None) -> by
 
     canvas = Image.new("RGBA", (WIDTH, height), BG + (255,))
     draw   = ImageDraw.Draw(canvas)
-    fonts  = {"title": _font(28), "sub": _font(19), "ilvl": _font(20),
-              "slot": _font(15), "stats": _font(13)}
+    fonts  = {"title": _font(28), "sub": _font(19), "ilvl": _font(20), "slot": _font(15)}
 
     if portrait:
         try:
@@ -219,20 +211,18 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None) -> by
 
     for index, slot_type in enumerate(LEFT_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   LEFT_X, HEADER_H + 10 + index * ROW_STEP, False, fonts,
-                   PORTRAIT_BOX[0] - LEFT_X - ICON - 20)
+                   LEFT_X, HEADER_H + 10 + index * ROW_STEP, False, fonts)
 
     for index, slot_type in enumerate(RIGHT_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   RIGHT_X, HEADER_H + 10 + index * ROW_STEP, True, fonts,
-                   RIGHT_X - PORTRAIT_BOX[2] - 20)
+                   RIGHT_X, HEADER_H + 10 + index * ROW_STEP, True, fonts)
 
     weapons_y = HEADER_H + 10 + body_h
     step      = ICON + BOTTOM_GAP
     start_x   = WIDTH // 2 - (len(BOTTOM_SLOTS) * step - BOTTOM_GAP) // 2
     for index, slot_type in enumerate(BOTTOM_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   start_x + index * step, weapons_y, False, fonts, BOTTOM_GAP - 14)
+                   start_x + index * step, weapons_y, False, fonts)
 
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, format="PNG", optimize=True)
