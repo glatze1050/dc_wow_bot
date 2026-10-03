@@ -199,6 +199,15 @@ def mplus_ranks(rio: dict) -> dict:
     return {key: (overall.get(key) or 0) or None for key in ("world", "region", "realm")}
 
 
+def spec_rank(rio: dict, summary: dict):
+    """World placing within the character's own specialisation."""
+    spec_id = ((summary or {}).get("active_spec") or {}).get("id")
+    if not spec_id:
+        return None
+    ranks = ((rio or {}).get("mythic_plus_ranks") or {}).get(f"spec_{spec_id}") or {}
+    return (ranks.get("world") or 0) or None
+
+
 def stat_percent(value) -> str:
     """The percentage alone: the rating beside it is often reported as zero."""
     if isinstance(value, dict):
@@ -1498,11 +1507,13 @@ class WowGroup(app_commands.Group):
             # reads like every other panel.
             ranks = mplus_ranks(rio)
             raid_name, raid_done = raid_cell(rio)
+            spec_place = spec_rank(rio, summary)
             plain = render_util.TEXT
             sheet_stats = [
                 ("Guild",        guild.strip() or "No guild", plain),
                 ("Spec",         spec, plain),
-                ("Level",        str(level), plain),
+                ("Spec Rank",    f"#{spec_place:,}" if spec_place else "—",
+                 render_util.rank_colour(spec_place)),
                 ("Achievements", f"{ach_pts:,}", plain),
                 ("M+ Rating",    f"{mp_score:.0f}" if mp_score else "—",
                  render_util.score_colour(mp_score)),
