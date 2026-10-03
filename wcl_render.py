@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from render_util import (
     BG, OUTLINE, PANEL, PILLOW_AVAILABLE, TEXT, TEXT_DIM, TEXT_FAINT,
-    fit, font, text_width, to_png,
+    fit, font, role_colour, spec_label, text_width, to_png,
 )
 
 if PILLOW_AVAILABLE:
@@ -21,7 +21,8 @@ ROW_H     = 34
 
 # Boss, Best %, Highest DPS, Kills, Fastest, Med, Points, Rank
 COLUMNS = (
-    ("Boss",        310, "left"),
+    ("Boss",        290, "left"),
+    ("Spec",        150, "left"),
     ("Best %",       92, "right"),
     ("Highest DPS", 150, "right"),
     ("Kills",        72, "right"),
@@ -143,6 +144,7 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
         plain  = TEXT if killed else TEXT_FAINT
         values = (
             fit(draw, boss.get("boss", "?"), fonts["cell"], COLUMNS[0][1] - 24),
+            spec_label(boss.get("spec", "")) if killed else "—",
             "—" if best_p is None else f"{best_p:.0f}",
             "—" if not number(boss.get("dps")) else f"{number(boss['dps']):,.0f}",
             str(number(boss.get("kills")) or 0),
@@ -151,7 +153,8 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
             "—" if not number(boss.get("points")) else f"{number(boss['points']):.1f}",
             "—" if not number(boss.get("rank")) else f"{number(boss['rank']):,}",
         )
-        colours = (plain, parse_colour(best_p), plain, plain, plain,
+        colours = (plain, role_colour(boss.get("spec", "")) if killed else TEXT_FAINT,
+                   parse_colour(best_p), plain, plain, plain,
                    parse_colour(boss.get("median")), plain,
                    TEXT_DIM if killed else TEXT_FAINT)
         x = MARGIN
@@ -175,7 +178,8 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
 
 # Dungeon, Level, Runs, Points, Rank, Best DPS, Best %, Median %
 DUNGEON_COLUMNS = (
-    ("Dungeon",   290, "left"),
+    ("Dungeon",   270, "left"),
+    ("Spec",      150, "left"),
     ("Level",      80, "right"),
     ("Runs",       80, "right"),
     ("Points",    100, "right"),
@@ -245,6 +249,7 @@ def render_dungeons(header: dict, summary: dict, rows: list) -> bytes | None:
         dps   = number(row.get("dps"))
         values = (
             fit(draw, row.get("dungeon", "?"), fonts["cell"], DUNGEON_COLUMNS[0][1] - 24),
+            spec_label(row.get("spec", "")),
             "—" if level is None else f"+{level:.0f}",
             str(number(row.get("runs")) or 0),
             "—" if number(row.get("points")) is None else f"{row['points']:.0f}",
@@ -253,7 +258,8 @@ def render_dungeons(header: dict, summary: dict, rows: list) -> bytes | None:
             "—" if number(row.get("best")) is None else f"{row['best']:.0f}",
             "—" if number(row.get("median")) is None else f"{row['median']:.0f}",
         )
-        colours = (TEXT, KEY_LEVEL, TEXT_DIM, SCORE_COLOUR, TEXT_DIM, TEXT,
+        colours = (TEXT, role_colour(row.get("spec", "")), KEY_LEVEL, TEXT_DIM,
+                   SCORE_COLOUR, TEXT_DIM, TEXT,
                    parse_colour(row.get("best")), parse_colour(row.get("median")))
         x = MARGIN
         for (_, width, align), value, colour in zip(DUNGEON_COLUMNS, values, colours):

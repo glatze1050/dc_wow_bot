@@ -771,6 +771,7 @@ async def dungeon_rankings(realm: str, name: str, region: str):
         rows.append({
             "id":      encounter.get("id"),
             "dungeon": encounter.get("name", "?"),
+            "spec":    entry.get("bestSpec") or entry.get("spec") or "",
             "level":   wcl_number(damage.get("best_level")),
             "runs":    wcl_number(entry.get("totalKills")) or 0,
             "points":  wcl_number(stars.get("points")),
@@ -790,194 +791,6 @@ async def dungeon_rankings(realm: str, name: str, region: str):
         "runs":       sum(row["runs"] for row in rows),
     }
     return summary, rows
-
-
-DUNGEON_RUNS_SHOWN = 12
-
-
-async def last_dungeon_runs(realm: str, name: str, region: str, dungeons: list):
-    """(dungeon, summary, runs) for whichever dungeon was played most recently.
-
-    zoneRankings only carries a character's best run per dungeon; the single
-    runs, with their key level and real duration, live under encounterRankings.
-    """
-    query = """
-    query($name:String!,$server:String!,$region:String!,$enc:Int!){
-      characterData { character(name:$name, serverSlug:$server, serverRegion:$region) {
-        encounterRankings(encounterID:$enc, metric: dps)
-      }}
-    }"""
-    base = {"name": name.capitalize(), "server": realm_slug(realm), "region": region.upper()}
-
-    async def one(dungeon: dict):
-        if not dungeon.get("id"):
-            return dungeon, {}
-        try:
-            data = await wcl_query(query, dict(base, enc=dungeon["id"]))
-        except Exception as exc:
-            print(f"[WARN] Runs for {dungeon.get('dungeon')} failed: {exc}")
-            return dungeon, {}
-        character = (data.get("characterData") or {}).get("character") or {}
-        blob = character.get("encounterRankings")
-        if isinstance(blob, str):
-            try:
-                blob = json.loads(blob)
-            except ValueError:
-                blob = {}
-        return dungeon, blob or {}
-
-    newest = None
-    for dungeon, blob in await asyncio.gather(*(one(d) for d in dungeons)):
-        ranks = blob.get("ranks") or []
-        if not ranks:
-            continue
-        latest = max(wcl_number(rank.get("startTime")) or 0 for rank in ranks)
-        if newest is None or latest > newest[0]:
-            newest = (latest, dungeon, blob)
-    if newest is None:
-        return None
-
-    _, dungeon, blob = newest
-    runs = sorted(
-        (
-            {
-                "level":    wcl_number(rank.get("bracketData")),
-                "duration": wcl_number(rank.get("duration")),
-                "dps":      wcl_number(rank.get("amount")),
-                "percent":  wcl_number(rank.get("historicalPercent")),
-                "started":  wcl_number(rank.get("startTime")),
-            }
-            for rank in blob.get("ranks") or []
-        ),
-        key=lambda run: run["started"] or 0,
-        reverse=True,
-    )
-
-    durations = [run["duration"] for run in runs if run["duration"]]
-    summary = {
-        # fastestKill is a negative placeholder for keystones, so take the
-        # quickest run we actually have.
-        "fastest_ms": min(durations) if durations else None,
-        "median":     wcl_number(blob.get("medianPerformance")),
-        "average":    wcl_number(blob.get("averagePerformance")),
-        "kills":      wcl_number(blob.get("totalKills")) or len(runs),
-        "best_dps":   wcl_number(blob.get("bestAmount")),
-        "points":     wcl_number(dungeon.get("points")),
-        "rank":       wcl_number(dungeon.get("rank")),
-    }
-    return dungeon.get("dungeon", "?"), summary, runs[:DUNGEON_RUNS_SHOWN]
-
-
-async def character_header(realm: str, name: str, region: str):
-    """Shared opening for every lookup: who it is, and how to colour them."""
-    summary = None
-    try:
-        summary = await get_summary(realm, name, region)
-    except Exception as exc:
-        print(f"[WARN] summary failed for {name}-{realm}: {type(exc).__name__}: {exc}")
-    char_class = (summary or {}).get("character_class", {}).get("name", "")
-    return {
-        "name":   (summary or {}).get("name", name.capitalize()),
-        "realm":  (summary or {}).get("realm", {}).get("name", realm),
-        "class":  char_class,
-        "emoji":  CLASS_EMOJIS.get(char_class, "⚔️"),
-        "colour": CLASS_COLORS.get(char_class, 0x888888),
-        "rgb":    render_util.rgb(CLASS_COLORS.get(char_class)),
-    }
-
-
-async def mplus_panels(who: dict, realm: str, name: str, region: str):
-    """(embeds, files) for the Mythic+ side: panel, table, latest dungeon."""
-    embeds, files = [], []
-    rio = None
-    try:
-        rio = await get_raiderio(realm, name, region)
-    except Exception as exc:
-        print(f"[WARN] raider.io failed for {name}-{realm}: {type(exc).__name__}: {exc}")
-
-    if rio:
-        seasons = rio.get("mythic_plus_scores_by_season", [])
-        panel = mplus_render.render_mplus(
-            header={
-                "title":        f"{who['name']} — Mythic+",
-                "title_colour": who["rgb"],
-                "subtitle": (seasons[0].get("season", "") if seasons else "").replace("-", " ").title(),
-            },
-            score=seasons[0].get("scores", {}) if seasons else {},
-            runs=await build_mplus_runs(rio),
-        )
-        embed = discord.Embed(color=who["colour"])
-        embed.set_author(name=f"{who['emoji']}  {who['name']}  —  Mythic+")
-        if panel:
-            files.append(discord.File(io.BytesIO(panel), filename="mplus.png"))
-            embed.set_image(url="attachment://mplus.png")
-        embeds.append(embed)
-
-    try:
-        summary, rows = await dungeon_rankings(realm, name, region)
-    except Exception as exc:
-        print(f"[WARN] Dungeon rankings failed: {exc}")
-        return embeds, files
-
-    if rows:
-        table = wcl_render.render_dungeons(
-            header={"title": f"{who['name']} — Mythic+ Dungeons",
-                    "subtitle": "Points & Damage by level"},
-            summary=summary, rows=rows)
-        embed = discord.Embed(color=who["colour"])
-        embed.set_author(name=f"{who['emoji']}  {who['name']}  —  Dungeon Logs")
-        if table:
-            files.append(discord.File(io.BytesIO(table), filename="dungeons.png"))
-            embed.set_image(url="attachment://dungeons.png")
-        embeds.append(embed)
-
-        try:
-            latest = await last_dungeon_runs(realm, name, region, rows)
-        except Exception as exc:
-            print(f"[WARN] Last dungeon lookup failed: {exc}")
-            latest = None
-        if latest:
-            dungeon_name, run_summary, runs = latest
-            runs_table = wcl_render.render_runs(
-                header={"title": dungeon_name, "subtitle": "most recently played"},
-                summary=run_summary, runs=runs)
-            embed = discord.Embed(color=who["colour"])
-            embed.set_author(name=f"{who['emoji']}  {who['name']}  —  {dungeon_name}")
-            if runs_table:
-                files.append(discord.File(io.BytesIO(runs_table), filename="runs.png"))
-                embed.set_image(url="attachment://runs.png")
-            embeds.append(embed)
-    return embeds, files
-
-
-async def raid_panels(who: dict, realm: str, name: str, region: str):
-    """(embeds, files) for the raid side: the Warcraft Logs boss table."""
-    try:
-        wcl = await get_wcl_character(realm, name, region)
-    except Exception as exc:
-        print(f"[WARN] warcraft logs failed for {name}-{realm}: {type(exc).__name__}: {exc}")
-        return [], []
-
-    zone       = read_zone_rankings(wcl)
-    zone_field = zone.get("zone")
-    zone_name  = (zone_field.get("name") if isinstance(zone_field, dict)
-                  else zone.get("zoneName", "Current Raid"))
-    difficulty = {3: "Normal", 4: "Heroic", 5: "Mythic"}.get(zone.get("difficulty"), "")
-    summary, rows = wcl_table_data(zone)
-    if not rows:
-        return [], []
-
-    table = wcl_render.render_wcl(
-        header={"title": f"{who['name']} — {zone_name}",
-                "subtitle": difficulty or "All difficulties"},
-        summary=summary, bosses=rows, notes=analyse_logs(summary, rows))
-    embed = discord.Embed(color=who["colour"])
-    embed.set_author(name=f"{who['emoji']}  {who['name']}  —  {zone_name}")
-    files = []
-    if table:
-        files.append(discord.File(io.BytesIO(table), filename="logs.png"))
-        embed.set_image(url="attachment://logs.png")
-    return [embed], files
 
 
 ART_CACHE_SIZE = 60
@@ -1035,6 +848,7 @@ def wcl_table_data(zone: dict):
         stars = entry.get("allStars") or {}
         rows.append({
             "boss":       (entry.get("encounter") or {}).get("name", "?"),
+            "spec":       entry.get("bestSpec") or entry.get("spec") or "",
             "best":       wcl_number(entry.get("rankPercent")),
             "median":     wcl_number(entry.get("medianPercent")),
             "dps":        wcl_number(entry.get("bestAmount")) or 0,
@@ -1759,36 +1573,6 @@ class WowGroup(app_commands.Group):
                         inline=True)
             embeds.append(e_dungeons)
 
-        # ══════════════════════════════════
-        #  LAST DUNGEON — every run of the one played most recently
-        # ══════════════════════════════════
-            latest = None
-            try:
-                latest = await last_dungeon_runs(realm, name, region, dungeon_rows)
-            except Exception as exc:
-                print(f"[WARN] Last dungeon lookup failed: {exc}")
-            if latest:
-                dungeon_name, run_summary, runs = latest
-                e_runs = discord.Embed(color=color)
-                e_runs.set_author(name=f"{class_emoji}  {char_name}  —  {dungeon_name}",
-                                  icon_url=thumb_url)
-                runs_table = wcl_render.render_runs(
-                    header={"title": dungeon_name, "subtitle": "most recently played"},
-                    summary=run_summary,
-                    runs=runs,
-                )
-                if runs_table:
-                    attachments.append(discord.File(io.BytesIO(runs_table),
-                                                    filename="runs.png"))
-                    e_runs.set_image(url="attachment://runs.png")
-                else:
-                    for run in runs[:6]:
-                        e_runs.add_field(
-                            name=f"+{run['level'] or 0}",
-                            value=f"`{(run['dps'] or 0) / 1000:.1f}K`  ·  "
-                                  f"`{run['percent'] or 0:.0f}%`",
-                            inline=True)
-                embeds.append(e_runs)
 
         # ══════════════════════════════════
 

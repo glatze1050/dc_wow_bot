@@ -42,6 +42,36 @@ RANK_TIERS = (
 )
 
 
+# Warcraft Logs reports the specialisation but not the role behind it.
+TANK_SPECS   = {"Blood", "Protection", "Guardian", "Brewmaster", "Vengeance"}
+HEALER_SPECS = {"Holy", "Discipline", "Restoration", "Mistweaver", "Preservation"}
+
+ROLE_COLOURS = {
+    "Tank":   (0, 136, 255),
+    "Healer": (30, 200, 60),
+    "DPS":    (226, 104, 104),
+}
+
+
+def spec_role(spec: str) -> str:
+    if not spec:
+        return ""
+    if spec in TANK_SPECS:
+        return "Tank"
+    if spec in HEALER_SPECS:
+        return "Healer"
+    return "DPS"
+
+
+def spec_label(spec: str) -> str:
+    role = spec_role(spec)
+    return f"{spec} · {role}" if role else "—"
+
+
+def role_colour(spec: str) -> tuple:
+    return ROLE_COLOURS.get(spec_role(spec), TEXT)
+
+
 def rgb(value) -> tuple:
     """0xA330C9 → (163, 48, 201); anything else falls back to plain text."""
     if not isinstance(value, int):
