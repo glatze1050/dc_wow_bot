@@ -65,15 +65,6 @@ def _draw_tile(canvas, draw, run: dict, x: int, y: int, fonts: dict):
         draw.text((centred(draw, key, fonts["key"], x, x + TILE_W), y + ART_H - 58),
                   key, font=fonts["key"], fill=KEY_COLOUR)
 
-    # Upgrade chevrons live in the top corner, clear of the key level, and are
-    # drawn rather than typed: not every font on a server carries a star.
-    upgrades = min(run.get("upgrades", 0) or 0, 3)
-    dot, gap = 9, 5
-    for index in range(upgrades):
-        left = x + TILE_W - 10 - (index + 1) * dot - index * gap
-        draw.ellipse([left, y + 10, left + dot, y + 10 + dot],
-                     fill=KEY_COLOUR, outline=OUTLINE)
-
     draw.rectangle([x, y, x + TILE_W, y + ART_H], outline=OUTLINE, width=2)
 
     # Label band: dungeon name over its score.
@@ -115,7 +106,7 @@ def render_mplus(header: dict, score: dict, runs: list) -> bytes | None:
 
     # Score block, centred like the window's big number.
     overall = score.get("all", 0) or 0
-    colour, label = score_tier(overall)
+    colour, _ = score_tier(overall)
     caption = "MYTHIC+ RATING"
     draw.text((centred(draw, caption, fonts["caption"], 0, WIDTH), HEADER_H + 10),
               caption, font=fonts["caption"], fill=ACCENT)
@@ -124,7 +115,7 @@ def render_mplus(header: dict, score: dict, runs: list) -> bytes | None:
     draw.text((centred(draw, big, fonts["huge"], 0, WIDTH), HEADER_H + 36),
               big, font=fonts["huge"], fill=colour)
 
-    roles = (f"{label}    ·    Tank {score.get('tank', 0):.0f}"
+    roles = (f"Tank {score.get('tank', 0):.0f}"
              f"    ·    Healer {score.get('healer', 0):.0f}"
              f"    ·    DPS {score.get('dps', 0):.0f}")
     draw.text((centred(draw, roles, fonts["roles"], 0, WIDTH), HEADER_H + 132),

@@ -728,14 +728,14 @@ async def dungeon_rankings(realm: str, name: str, region: str):
     return summary, rows
 
 
-RECENT_RUNS_SHOWN = 12
+DUNGEON_RUNS_SHOWN = 12
 
 
-async def recent_runs(realm: str, name: str, region: str, dungeons: list) -> list:
-    """Every logged keystone run, newest first.
+async def last_dungeon_runs(realm: str, name: str, region: str, dungeons: list):
+    """(dungeon, summary, runs) for whichever dungeon was played most recently.
 
-    zoneRankings only carries a character's best per dungeon; the individual
-    runs — with their duration and key level — live under encounterRankings.
+    zoneRankings only carries a character's best run per dungeon; the single
+    runs, with their key level and real duration, live under encounterRankings.
     """
     query = """
     query($name:String!,$server:String!,$region:String!,$enc:Int!){
@@ -745,14 +745,14 @@ async def recent_runs(realm: str, name: str, region: str, dungeons: list) -> lis
     }"""
     base = {"name": name.capitalize(), "server": realm_slug(realm), "region": region.upper()}
 
-    async def one(dungeon: dict) -> list:
+    async def one(dungeon: dict):
         if not dungeon.get("id"):
-            return []
+            return dungeon, {}
         try:
             data = await wcl_query(query, dict(base, enc=dungeon["id"]))
         except Exception as exc:
             print(f"[WARN] Runs for {dungeon.get('dungeon')} failed: {exc}")
-            return []
+            return dungeon, {}
         character = (data.get("characterData") or {}).get("character") or {}
         blob = character.get("encounterRankings")
         if isinstance(blob, str):
@@ -760,23 +760,48 @@ async def recent_runs(realm: str, name: str, region: str, dungeons: list) -> lis
                 blob = json.loads(blob)
             except ValueError:
                 blob = {}
-        rows = []
-        for rank in (blob or {}).get("ranks") or []:
-            started = wcl_number(rank.get("startTime"))
-            rows.append({
-                "dungeon":  dungeon.get("dungeon", "?"),
+        return dungeon, blob or {}
+
+    newest = None
+    for dungeon, blob in await asyncio.gather(*(one(d) for d in dungeons)):
+        ranks = blob.get("ranks") or []
+        if not ranks:
+            continue
+        latest = max(wcl_number(rank.get("startTime")) or 0 for rank in ranks)
+        if newest is None or latest > newest[0]:
+            newest = (latest, dungeon, blob)
+    if newest is None:
+        return None
+
+    _, dungeon, blob = newest
+    runs = sorted(
+        (
+            {
                 "level":    wcl_number(rank.get("bracketData")),
                 "duration": wcl_number(rank.get("duration")),
                 "dps":      wcl_number(rank.get("amount")),
                 "percent":  wcl_number(rank.get("historicalPercent")),
-                "started":  started,
-            })
-        return rows
+                "started":  wcl_number(rank.get("startTime")),
+            }
+            for rank in blob.get("ranks") or []
+        ),
+        key=lambda run: run["started"] or 0,
+        reverse=True,
+    )
 
-    batches = await asyncio.gather(*(one(d) for d in dungeons))
-    runs = [row for batch in batches for row in batch]
-    runs.sort(key=lambda row: row["started"] or 0, reverse=True)
-    return runs[:RECENT_RUNS_SHOWN]
+    durations = [run["duration"] for run in runs if run["duration"]]
+    summary = {
+        # fastestKill is a negative placeholder for keystones, so take the
+        # quickest run we actually have.
+        "fastest_ms": min(durations) if durations else None,
+        "median":     wcl_number(blob.get("medianPerformance")),
+        "average":    wcl_number(blob.get("averagePerformance")),
+        "kills":      wcl_number(blob.get("totalKills")) or len(runs),
+        "best_dps":   wcl_number(blob.get("bestAmount")),
+        "points":     wcl_number(dungeon.get("points")),
+        "rank":       wcl_number(dungeon.get("rank")),
+    }
+    return dungeon.get("dungeon", "?"), summary, runs[:DUNGEON_RUNS_SHOWN]
 
 
 ART_CACHE_SIZE = 60
@@ -1388,13 +1413,11 @@ class WowGroup(app_commands.Group):
                 last_login_str = f"<t:{int(dt.timestamp())}:R>"
 
             e1.add_field(name="📋 Profile", value=(
-                f"{faction_ico} **{race}** {char_class} — {spec}\n"
-                f"🏛️ {guild_str}\n"
-                f"📊 Level **{level}** · iLvl **{ilvl_eq}** *(avg {ilvl_avg})*\n"
-                f"🏆 **{ach_pts:,}** Achievement Points\n"
-                f"🕒 Last online: {last_login_str}"
-                + (f"\n🏰 {raid_standing}" if raid_standing else "")
-                + "\n" + "━" * 44   # one line at full embed width; longer and it wraps
+                f"{faction_ico} **{race} {char_class}** — {spec}  ·  {guild_str}\n"
+                f"📊 Level **{level}**  ·  iLvl **{ilvl_eq}** *(avg {ilvl_avg})*  ·  🏆 **{ach_pts:,}**\n"
+                f"🕒 {last_login_str}"
+                + (f"  ·  🏰 {raid_standing}" if raid_standing else "")
+                + "\n" + "━" * 44   # one line at full embed width
             ), inline=False)
 
 
@@ -1462,11 +1485,10 @@ class WowGroup(app_commands.Group):
             }
             top_stat = max(ratings, key=ratings.get)
 
-            e1.add_field(name="⚡ Haste",       value=f"**{fmt_stat(haste)}**",   inline=True)
-            e1.add_field(name="🎯 Crit",        value=f"**{fmt_stat(crit)}**",    inline=True)
-            e1.add_field(name="🔮 Mastery",     value=f"**{fmt_stat(mastery)}**", inline=True)
-            e1.add_field(name="🛡️ Versatility", value=f"**{vers_dmg:.1f}% ({vers:,})**", inline=True)
-            e1.add_field(name="📊 Item Level",  value=f"**{ilvl_eq}** *(avg {ilvl_avg})*" if summary else "—", inline=True)
+            e1.add_field(name="📊 Secondary Stats", value=(
+                f"⚡ Haste **{fmt_stat(haste)}**  ·  🎯 Crit **{fmt_stat(crit)}**\n"
+                f"🔮 Mastery **{fmt_stat(mastery)}**  ·  🛡️ Vers **{vers_dmg:.1f}% ({vers:,})**"
+            ), inline=False)
 
 
 
@@ -1541,20 +1563,21 @@ class WowGroup(app_commands.Group):
             embeds.append(e_dungeons)
 
         # ══════════════════════════════════
-        #  RECENT RUNS — individual keystones, newest first
+        #  LAST DUNGEON — every run of the one played most recently
         # ══════════════════════════════════
-            runs = []
+            latest = None
             try:
-                runs = await recent_runs(realm, name, region, dungeon_rows)
+                latest = await last_dungeon_runs(realm, name, region, dungeon_rows)
             except Exception as exc:
-                print(f"[WARN] Recent runs failed: {exc}")
-            if runs:
+                print(f"[WARN] Last dungeon lookup failed: {exc}")
+            if latest:
+                dungeon_name, run_summary, runs = latest
                 e_runs = discord.Embed(color=color)
-                e_runs.set_author(name=f"{class_emoji}  {char_name}  —  Recent Runs",
+                e_runs.set_author(name=f"{class_emoji}  {char_name}  —  {dungeon_name}",
                                   icon_url=thumb_url)
                 runs_table = wcl_render.render_runs(
-                    header={"title": f"{char_name} — Recent Keystones",
-                            "subtitle": "newest first"},
+                    header={"title": dungeon_name, "subtitle": "most recently played"},
+                    summary=run_summary,
                     runs=runs,
                 )
                 if runs_table:
@@ -1564,7 +1587,7 @@ class WowGroup(app_commands.Group):
                 else:
                     for run in runs[:6]:
                         e_runs.add_field(
-                            name=f"+{run['level'] or 0} {run['dungeon']}",
+                            name=f"+{run['level'] or 0}",
                             value=f"`{(run['dps'] or 0) / 1000:.1f}K`  ·  "
                                   f"`{run['percent'] or 0:.0f}%`",
                             inline=True)
