@@ -39,6 +39,23 @@ SCORE_TIERS = [
 
 KEY_COLOUR = (255, 212, 90)
 
+# A key level reads like an item: the higher it is, the richer the colour.
+KEY_TIERS = (
+    (20, (255, 128, 0)),
+    (15, (163, 53, 238)),
+    (10, (0, 136, 255)),
+    (5,  (30, 200, 60)),
+)
+
+
+def key_colour(level) -> tuple:
+    if not isinstance(level, (int, float)) or level <= 0:
+        return TEXT_DIM
+    for threshold, colour in KEY_TIERS:
+        if level >= threshold:
+            return colour
+    return TEXT_DIM
+
 
 def score_tier(score: float):
     for threshold, colour, label in SCORE_TIERS:
@@ -77,7 +94,7 @@ def _draw_tile(canvas, draw, run: dict, x: int, y: int, fonts: dict):
     if score:
         text = f"{score:.0f}"
         draw.text((centred(draw, text, fonts["score"], x, x + TILE_W), y + ART_H + 30),
-                  text, font=fonts["score"], fill=ACCENT)
+                  text, font=fonts["score"], fill=key_colour(run.get("level")))
 
 
 def render_mplus(header: dict, score: dict, runs: list) -> bytes | None:
@@ -98,7 +115,8 @@ def render_mplus(header: dict, score: dict, runs: list) -> bytes | None:
         "name": font(15), "score": font(20),
     }
 
-    draw.text((MARGIN, 20), header.get("title", ""), font=fonts["title"], fill=TEXT)
+    draw.text((MARGIN, 20), header.get("title", ""), font=fonts["title"],
+              fill=header.get("title_colour") or TEXT)
     subtitle = header.get("subtitle", "")
     if subtitle:
         draw.text((WIDTH - MARGIN - text_width(draw, subtitle, fonts["sub"]), 28),
@@ -106,7 +124,7 @@ def render_mplus(header: dict, score: dict, runs: list) -> bytes | None:
 
     # Score block, centred like the window's big number.
     overall = score.get("all", 0) or 0
-    colour, _ = score_tier(overall)
+    colour, label = score_tier(overall)
     caption = "MYTHIC+ RATING"
     draw.text((centred(draw, caption, fonts["caption"], 0, WIDTH), HEADER_H + 10),
               caption, font=fonts["caption"], fill=ACCENT)
@@ -115,6 +133,7 @@ def render_mplus(header: dict, score: dict, runs: list) -> bytes | None:
     draw.text((centred(draw, big, fonts["huge"], 0, WIDTH), HEADER_H + 36),
               big, font=fonts["huge"], fill=colour)
 
+    _ = label
     roles = (f"Tank {score.get('tank', 0):.0f}"
              f"    ·    Healer {score.get('healer', 0):.0f}"
              f"    ·    DPS {score.get('dps', 0):.0f}")

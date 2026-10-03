@@ -868,6 +868,118 @@ async def last_dungeon_runs(realm: str, name: str, region: str, dungeons: list):
     return dungeon.get("dungeon", "?"), summary, runs[:DUNGEON_RUNS_SHOWN]
 
 
+async def character_header(realm: str, name: str, region: str):
+    """Shared opening for every lookup: who it is, and how to colour them."""
+    summary = None
+    try:
+        summary = await get_summary(realm, name, region)
+    except Exception as exc:
+        print(f"[WARN] summary failed for {name}-{realm}: {type(exc).__name__}: {exc}")
+    char_class = (summary or {}).get("character_class", {}).get("name", "")
+    return {
+        "name":   (summary or {}).get("name", name.capitalize()),
+        "realm":  (summary or {}).get("realm", {}).get("name", realm),
+        "class":  char_class,
+        "emoji":  CLASS_EMOJIS.get(char_class, "⚔️"),
+        "colour": CLASS_COLORS.get(char_class, 0x888888),
+        "rgb":    render_util.rgb(CLASS_COLORS.get(char_class)),
+    }
+
+
+async def mplus_panels(who: dict, realm: str, name: str, region: str):
+    """(embeds, files) for the Mythic+ side: panel, table, latest dungeon."""
+    embeds, files = [], []
+    rio = None
+    try:
+        rio = await get_raiderio(realm, name, region)
+    except Exception as exc:
+        print(f"[WARN] raider.io failed for {name}-{realm}: {type(exc).__name__}: {exc}")
+
+    if rio:
+        seasons = rio.get("mythic_plus_scores_by_season", [])
+        panel = mplus_render.render_mplus(
+            header={
+                "title":        f"{who['name']} — Mythic+",
+                "title_colour": who["rgb"],
+                "subtitle": (seasons[0].get("season", "") if seasons else "").replace("-", " ").title(),
+            },
+            score=seasons[0].get("scores", {}) if seasons else {},
+            runs=await build_mplus_runs(rio),
+        )
+        embed = discord.Embed(color=who["colour"])
+        embed.set_author(name=f"{who['emoji']}  {who['name']}  —  Mythic+")
+        if panel:
+            files.append(discord.File(io.BytesIO(panel), filename="mplus.png"))
+            embed.set_image(url="attachment://mplus.png")
+        embeds.append(embed)
+
+    try:
+        summary, rows = await dungeon_rankings(realm, name, region)
+    except Exception as exc:
+        print(f"[WARN] Dungeon rankings failed: {exc}")
+        return embeds, files
+
+    if rows:
+        table = wcl_render.render_dungeons(
+            header={"title": f"{who['name']} — Mythic+ Dungeons",
+                    "subtitle": "Points & Damage by level"},
+            summary=summary, rows=rows)
+        embed = discord.Embed(color=who["colour"])
+        embed.set_author(name=f"{who['emoji']}  {who['name']}  —  Dungeon Logs")
+        if table:
+            files.append(discord.File(io.BytesIO(table), filename="dungeons.png"))
+            embed.set_image(url="attachment://dungeons.png")
+        embeds.append(embed)
+
+        try:
+            latest = await last_dungeon_runs(realm, name, region, rows)
+        except Exception as exc:
+            print(f"[WARN] Last dungeon lookup failed: {exc}")
+            latest = None
+        if latest:
+            dungeon_name, run_summary, runs = latest
+            runs_table = wcl_render.render_runs(
+                header={"title": dungeon_name, "subtitle": "most recently played"},
+                summary=run_summary, runs=runs)
+            embed = discord.Embed(color=who["colour"])
+            embed.set_author(name=f"{who['emoji']}  {who['name']}  —  {dungeon_name}")
+            if runs_table:
+                files.append(discord.File(io.BytesIO(runs_table), filename="runs.png"))
+                embed.set_image(url="attachment://runs.png")
+            embeds.append(embed)
+    return embeds, files
+
+
+async def raid_panels(who: dict, realm: str, name: str, region: str):
+    """(embeds, files) for the raid side: the Warcraft Logs boss table."""
+    try:
+        wcl = await get_wcl_character(realm, name, region)
+    except Exception as exc:
+        print(f"[WARN] warcraft logs failed for {name}-{realm}: {type(exc).__name__}: {exc}")
+        return [], []
+
+    zone       = read_zone_rankings(wcl)
+    zone_field = zone.get("zone")
+    zone_name  = (zone_field.get("name") if isinstance(zone_field, dict)
+                  else zone.get("zoneName", "Current Raid"))
+    difficulty = {3: "Normal", 4: "Heroic", 5: "Mythic"}.get(zone.get("difficulty"), "")
+    summary, rows = wcl_table_data(zone)
+    if not rows:
+        return [], []
+
+    table = wcl_render.render_wcl(
+        header={"title": f"{who['name']} — {zone_name}",
+                "subtitle": difficulty or "All difficulties"},
+        summary=summary, bosses=rows, notes=analyse_logs(summary, rows))
+    embed = discord.Embed(color=who["colour"])
+    embed.set_author(name=f"{who['emoji']}  {who['name']}  —  {zone_name}")
+    files = []
+    if table:
+        files.append(discord.File(io.BytesIO(table), filename="logs.png"))
+        embed.set_image(url="attachment://logs.png")
+    return [embed], files
+
+
 ART_CACHE_SIZE = 60
 _art_cache: dict = {}
 
@@ -1596,7 +1708,8 @@ class WowGroup(app_commands.Group):
             scores  = seasons[0].get("scores", {}) if seasons else {}
             panel = mplus_render.render_mplus(
                 header={
-                    "title":    f"{char_name} — Mythic+",
+                    "title":        f"{char_name} — Mythic+",
+                    "title_colour": class_colour,
                     "subtitle": (seasons[0].get("season", "") if seasons else "").replace("-", " ").title(),
                 },
                 score=scores,
@@ -1895,6 +2008,62 @@ class WowSetupGroup(app_commands.Group):
 
         embed.set_footer(text=f"WoW Bot · /wow compare · {region.upper()}  |  Data: Blizzard API + Raider.IO")
         await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="mplus", description="Post only the Mythic+ panels for a character")
+    @app_commands.describe(
+        name="Character — pick one this server has looked up before",
+        realm="Realm — leave empty to reuse the last one",
+        region="Region (default: eu)",
+    )
+    @app_commands.choices(region=[
+        app_commands.Choice(name="🇪🇺 EU", value="eu"),
+        app_commands.Choice(name="🇺🇸 US", value="us"),
+    ])
+    @app_commands.autocomplete(name=character_autocomplete, realm=realm_autocomplete)
+    async def mplus(self, interaction: discord.Interaction, name: str,
+                    realm: str = "", region: str = "eu"):
+        await self._post_panels(interaction, name, realm, region, mplus_panels, "Mythic+")
+
+    @app_commands.command(name="raid", description="Post only the raid logs for a character")
+    @app_commands.describe(
+        name="Character — pick one this server has looked up before",
+        realm="Realm — leave empty to reuse the last one",
+        region="Region (default: eu)",
+    )
+    @app_commands.choices(region=[
+        app_commands.Choice(name="🇪🇺 EU", value="eu"),
+        app_commands.Choice(name="🇺🇸 US", value="us"),
+    ])
+    @app_commands.autocomplete(name=character_autocomplete, realm=realm_autocomplete)
+    async def raid(self, interaction: discord.Interaction, name: str,
+                   realm: str = "", region: str = "eu"):
+        await self._post_panels(interaction, name, realm, region, raid_panels, "raid logs")
+
+    async def _post_panels(self, interaction, name, realm, region, builder, what):
+        """Shared body: resolve the realm, build the panels, replace the notice."""
+        if not is_admin(interaction):
+            return await interaction.response.send_message(
+                embed=error_embed("Administrators only."), ephemeral=True)
+        await interaction.response.send_message(embed=working_embed(name, realm or "…"))
+
+        if not realm:
+            remembered = recall_character(interaction.guild_id, name)
+            if not remembered:
+                return await interaction.edit_original_response(embed=error_embed(
+                    f"No realm given for **{name}**, and this server has not looked it up before."
+                ))
+            realm  = remembered["realm"]
+            region = remembered.get("region") or region
+
+        who = await character_header(realm, name, region)
+        embeds, files = await builder(who, realm, name, region)
+        if not embeds:
+            return await interaction.edit_original_response(embed=error_embed(
+                f"No {what} found for **{who['name']}** on **{realm}**."))
+
+        await interaction.edit_original_response(
+            embeds=embeds, attachments=files or discord.utils.MISSING)
+        remember_character(interaction.guild_id, who["name"], realm, region, who["realm"])
 
     @app_commands.command(name="news_channel", description="Set the channel for WoW news & patch notes")
     @app_commands.describe(channel_id="Channel ID (right-click → Copy ID)")
