@@ -58,6 +58,7 @@ QUALITY_COLORS = {
 LEFT_SLOTS   = ["HEAD", "NECK", "SHOULDER", "BACK", "CHEST", "WRIST", "HANDS", "WAIST"]
 RIGHT_SLOTS  = ["LEGS", "FEET", "FINGER_1", "FINGER_2", "TRINKET_1", "TRINKET_2"]
 BOTTOM_SLOTS = ["MAIN_HAND", "OFF_HAND"]
+BOTTOM_GAP   = 130      # wide enough for the item level and slot name between icons
 
 FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -206,11 +207,11 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None) -> by
                    RIGHT_X, HEADER_H + 10 + index * ROW_STEP, True, fonts)
 
     weapons_y = HEADER_H + 10 + body_h
-    span      = len(BOTTOM_SLOTS) * (ICON + 70)
-    start_x   = WIDTH // 2 - span // 2
+    step      = ICON + BOTTOM_GAP
+    start_x   = WIDTH // 2 - (len(BOTTOM_SLOTS) * step - BOTTOM_GAP) // 2
     for index, slot_type in enumerate(BOTTOM_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   start_x + index * (ICON + 70), weapons_y, False, fonts)
+                   start_x + index * step, weapons_y, False, fonts)
 
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, format="PNG", optimize=True)
