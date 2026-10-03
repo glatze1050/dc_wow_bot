@@ -627,6 +627,85 @@ def wcl_parse_emoji(pct: float) -> str:
     return "⬜"                  # Poor
 
 
+WCL_ENDPOINT   = "https://www.warcraftlogs.com/api/v2/client"
+WCL_METRICS    = ("dps", "hps", "playerspeed")   # Damage, Healing, Speed
+MPLUS_ZONE_TTL = 12 * 3600
+
+_mplus_zone: dict = {}
+
+
+async def wcl_query(query: str, variables: dict) -> dict:
+    token = await get_wcl_token()
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+        async with session.post(WCL_ENDPOINT,
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"query": query, "variables": variables}) as response:
+            if response.status != 200:
+                raise ValueError(f"Warcraft Logs API error ({response.status})")
+            payload = await response.json()
+    if payload.get("errors"):
+        raise ValueError(payload["errors"][0].get("message", "Warcraft Logs rejected the query"))
+    return payload.get("data") or {}
+
+
+async def current_mplus_zone() -> int:
+    """Newest "Mythic+ Season" zone, so a new season needs no code change."""
+    now = datetime.now(timezone.utc).timestamp()
+    if _mplus_zone.get("expires", 0) > now:
+        return _mplus_zone["id"]
+    data  = await wcl_query("query { worldData { zones { id name } } }", {})
+    zones = (data.get("worldData") or {}).get("zones") or []
+    seasons = [z for z in zones if z.get("name", "").startswith("Mythic+ Season")]
+    if not seasons:
+        raise ValueError("No Mythic+ zone found on Warcraft Logs")
+    newest = max(seasons, key=lambda z: z["id"])
+    _mplus_zone.update(id=newest["id"], expires=now + MPLUS_ZONE_TTL)
+    return newest["id"]
+
+
+async def dungeon_rankings(realm: str, name: str, region: str) -> list:
+    """One row per dungeon with its Damage, Healing and Speed percentile."""
+    zone  = await current_mplus_zone()
+    query = """
+    query($name:String!,$server:String!,$region:String!,$zone:Int!,$metric:CharacterPageRankingMetricType!){
+      characterData { character(name:$name, serverSlug:$server, serverRegion:$region) {
+        zoneRankings(zoneID:$zone, metric:$metric)
+      }}
+    }"""
+    base = {"name": name.capitalize(), "server": realm_slug(realm),
+            "region": region.upper(), "zone": zone}
+
+    async def one(metric):
+        data = await wcl_query(query, dict(base, metric=metric))
+        char = (data.get("characterData") or {}).get("character") or {}
+        blob = char.get("zoneRankings")
+        if isinstance(blob, str):
+            try:
+                blob = json.loads(blob)
+            except ValueError:
+                blob = {}
+        return (blob or {}).get("rankings") or []
+
+    damage, healing, speed = await asyncio.gather(*(one(m) for m in WCL_METRICS))
+
+    def by_name(entries):
+        return {(e.get("encounter") or {}).get("name", "?"): e for e in entries}
+
+    healing_by, speed_by = by_name(healing), by_name(speed)
+    rows = []
+    for entry in damage:
+        dungeon = (entry.get("encounter") or {}).get("name", "?")
+        rows.append({
+            "dungeon": dungeon,
+            "damage":  entry.get("rankPercent"),
+            "healing": (healing_by.get(dungeon) or {}).get("rankPercent"),
+            "speed":   (speed_by.get(dungeon) or {}).get("rankPercent"),
+            "dps":     entry.get("bestAmount") or 0,
+            "runs":    entry.get("totalKills") or 0,
+        })
+    rows.sort(key=lambda r: r["damage"] or 0, reverse=True)
+    return rows
+
 ART_CACHE_SIZE = 60
 _art_cache: dict = {}
 
@@ -1353,6 +1432,36 @@ class WowGroup(app_commands.Group):
             e2.description = "*(Raider.IO data unavailable — the character needs a recent login.)*"
 
         embeds.append(e2)
+
+        # ══════════════════════════════════
+        #  DUNGEON LOGS — Mythic+ on Warcraft Logs
+        # ══════════════════════════════════
+        dungeon_rows = []
+        if wcl_ok:
+            try:
+                dungeon_rows = await dungeon_rankings(realm, name, region)
+            except Exception as exc:
+                print(f"[WARN] Dungeon rankings failed: {exc}")
+        if dungeon_rows:
+            e_dungeons = discord.Embed(color=color)
+            e_dungeons.set_author(name=f"{class_emoji}  {char_name}  —  Dungeon Logs",
+                                  icon_url=thumb_url)
+            dungeon_table = wcl_render.render_dungeons(
+                header={"title": f"{char_name} — Mythic+ Dungeons",
+                        "subtitle": "Damage  ·  Healing  ·  Speed"},
+                rows=dungeon_rows,
+            )
+            if dungeon_table:
+                attachments.append(discord.File(io.BytesIO(dungeon_table), filename="dungeons.png"))
+                e_dungeons.set_image(url="attachment://dungeons.png")
+            else:
+                for row in dungeon_rows[:6]:
+                    e_dungeons.add_field(
+                        name=row["dungeon"],
+                        value=f"Dmg `{row['damage'] or 0:.0f}`  Heal `{row['healing'] or 0:.0f}`  "
+                              f"Speed `{row['speed'] or 0:.0f}`",
+                        inline=True)
+            embeds.append(e_dungeons)
 
         # ══════════════════════════════════
         #  EMBED 3 — PvP + ACHIEVEMENTS
