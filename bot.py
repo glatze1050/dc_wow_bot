@@ -345,39 +345,36 @@ def item_stat_line(item: dict) -> str:
     return " · ".join(parts)
 
 
+ARMOR_SLOTS = ["HEAD", "SHOULDER", "CHEST", "WRIST", "HANDS", "WAIST", "LEGS", "FEET", "BACK"]
+OTHER_SLOTS = ["NECK", "FINGER_1", "FINGER_2", "TRINKET_1", "TRINKET_2", "MAIN_HAND", "OFF_HAND"]
+
+
+def item_line(item: dict) -> str:
+    """One scannable line: quality, slot, level, name, stats, markers."""
+    slot_name = (item.get("slot") or {}).get("name") or "?"
+    ilvl      = (item.get("level") or {}).get("value", 0)
+    icon      = QUALITY_ICONS.get((item.get("quality") or {}).get("type", "COMMON"), "⚪")
+    line      = f"{icon} **{slot_name}** `{ilvl}` {item.get('name', 'Unknown')}"
+    stats     = secondary_stat_line(item)
+    if stats:
+        line += f" · {stats}"
+    if item.get("enchantments"):
+        line += " ✨"
+    if item.get("sockets"):
+        line += " 💎"
+    return line
+
+
 def build_item_fields(equipment: dict) -> list:
-    """One tooltip-shaped field per equipped item, in paper-doll order."""
+    """Two blocks rather than sixteen cards — a wall of cards reads as noise."""
     items  = {i["slot"]["type"]: i for i in equipment.get("equipped_items", [])}
     fields = []
-    for slot_type in SLOT_ORDER:
-        item = items.get(slot_type)
-        if not item:
-            continue
-        slot_name = (item.get("slot") or {}).get("name") or slot_type.title()
-        ilvl      = (item.get("level") or {}).get("value", 0)
-        quality   = (item.get("quality") or {}).get("type", "COMMON")
-        track     = ((item.get("name_description") or {}).get("display_string") or "").strip()
-
-        header = f"{QUALITY_ICONS.get(quality, '⚪')} {slot_name}  ·  {ilvl}"
-        if track:
-            header += f"  ·  {track}"
-
-        lines = [f"**{item.get('name', 'Unknown')}**"]
-        stats = item_stat_line(item)
-        if stats:
-            lines.append(stats)
-        for ench in item.get("enchantments", []):
-            label = enchant_label(ench.get("display_string", ""))
-            if label:
-                lines.append(f"✨ {label}")
-        for socket in item.get("sockets", []):
-            bonus = plain_display(socket.get("display_string", ""))
-            if bonus:
-                lines.append(f"💎 {bonus}")
-
-        fields.append((header[:256], "\n".join(lines)[:1024]))
+    for title, group in (("🛡️ Armour", ARMOR_SLOTS),
+                         ("💍 Jewellery & Weapons", OTHER_SLOTS)):
+        lines = [item_line(items[s]) for s in group if s in items]
+        if lines:
+            fields.append((title, ("\n".join(lines))[:1024]))
     return fields
-
 
 def secondary_stat_line(item: dict) -> str:
     """'+79 Haste · +112 Vers' — off-spec stats are flagged and left out."""
@@ -1121,7 +1118,9 @@ class WowGroup(app_commands.Group):
                 f"🕒 Last online: {last_login_str}"
             ), inline=False)
 
-            e1.add_field(name="🎯 Content Readiness", value=readiness, inline=False)
+            # A long line is what pushes the embed out to its full width.
+            e1.add_field(name="🎯 Content Readiness",
+                         value=readiness + "\n" + "━" * 46, inline=False)
 
         elif rio:
             spec = rio.get("active_spec_name", "?")
@@ -1260,29 +1259,13 @@ class WowGroup(app_commands.Group):
                     lines.append(f"🔑 `+{level:>2}` **{full}** {stars} — `{sc_r:.1f} pts`")
                 e2.add_field(name="🏅 Top 5 M+ Runs", value="\n".join(lines), inline=False)
 
-            # Raid Progression
-            prog_dict = rio.get("raid_progression", {})
-            if prog_dict:
-                e2.add_field(name="⠀", value="**🏰 Raid Progression**", inline=False)
-                for raid_name, p in prog_dict.items():
-                    n  = p.get("normal_bosses_killed", 0)
-                    h  = p.get("heroic_bosses_killed", 0)
-                    m  = p.get("mythic_bosses_killed", 0)
-                    nt = p.get("total_bosses", 0)
-                    display = raid_name.replace("-", " ").title()
-                    e2.add_field(name=f"📍 {display}", value=(
-                        f"🟢 N `{progress_bar(n,nt)}` **{n}/{nt}**\n"
-                        f"🔵 H `{progress_bar(h,nt)}` **{h}/{nt}**\n"
-                        f"🟣 M `{progress_bar(m,nt)}` **{m}/{nt}**"
-                    ), inline=True)
-
             profile_url = rio.get("profile_url")
             if profile_url:
                 e2.add_field(name="🔗 RaiderIO", value=f"[View profile]({profile_url})", inline=False)
         else:
             e2.description = "*(Raider.IO data unavailable — the character needs a recent login.)*"
 
-        e2.set_footer(text="WoW Bot · Page 3/5  —  Mythic+ & Raids")
+        e2.set_footer(text="WoW Bot · Page 3/5  —  Mythic+")
         embeds.append(e2)
 
         # ══════════════════════════════════
@@ -1353,8 +1336,7 @@ class WowGroup(app_commands.Group):
                 inline=False,
             )
 
-        e3.set_footer(text="WoW Bot · Page 4/5  —  PvP & Achievements")
-        embeds.append(e3)
+        e3.set_footer(text="WoW Bot · Page 5/5  —  PvP & Achievements")
 
         # ══════════════════════════════════
         #  EMBED 4 — WARCRAFT LOGS
@@ -1426,8 +1408,23 @@ class WowGroup(app_commands.Group):
         else:
             e4.description = "*This character has no public raid logs.*"
 
-        e4.set_footer(text="WoW Bot · Page 5/5  —  Raid Logs  |  Data: Blizzard API + Raider.IO + Warcraft Logs")
+        # Raid progression belongs with the logs, not on the Mythic+ page.
+        if rio and rio.get("raid_progression"):
+            e4.add_field(name="⠀", value="**🏰 Raid Progression**", inline=False)
+            for raid_name, progress in rio["raid_progression"].items():
+                killed_n = progress.get("normal_bosses_killed", 0)
+                killed_h = progress.get("heroic_bosses_killed", 0)
+                killed_m = progress.get("mythic_bosses_killed", 0)
+                total    = progress.get("total_bosses", 0)
+                e4.add_field(name=f"📍 {raid_name.replace(chr(45), chr(32)).title()}", value=(
+                    f"🟢 N `{progress_bar(killed_n, total)}` **{killed_n}/{total}**\n"
+                    f"🔵 H `{progress_bar(killed_h, total)}` **{killed_h}/{total}**\n"
+                    f"🟣 M `{progress_bar(killed_m, total)}` **{killed_m}/{total}**"
+                ), inline=True)
+
+        e4.set_footer(text="WoW Bot · Page 4/5  —  Raid Logs & Progression  |  Data: Blizzard API + Raider.IO + Warcraft Logs")
         embeds.append(e4)
+        embeds.append(e3)
 
         await interaction.followup.send(embeds=embeds, files=attachments or discord.utils.MISSING)
 
