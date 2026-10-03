@@ -5,6 +5,7 @@ import aiohttp
 import asyncio
 import base64
 import html
+import io
 import json
 import os
 import re
@@ -13,6 +14,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from dotenv import load_dotenv
+
+import gear_render
 
 load_dotenv()
 
@@ -217,10 +220,13 @@ async def get_blizzard_token(region: str = "eu") -> str:
             _blizzard_token_expiry = now + data["expires_in"]
             return _blizzard_token
 
-async def blizzard_get(path: str, region: str = "eu") -> dict:
+async def blizzard_get(path: str, region: str = "eu", namespace: str = "") -> dict:
     token = await get_blizzard_token(region)
     url   = f"https://{region}.api.blizzard.com{path}"
-    params = {"namespace": f"profile-{region}", "locale": "en_GB" if region == "eu" else "en_US"}
+    params = {
+        "namespace": namespace or f"profile-{region}",
+        "locale": "en_GB" if region == "eu" else "en_US",
+    }
     async with aiohttp.ClientSession() as s:
         async with s.get(url, params=params, headers={"Authorization": f"Bearer {token}"}) as r:
             if r.status == 404:
@@ -246,6 +252,157 @@ async def get_achievements(realm: str, name: str, region: str) -> dict:
 
 async def get_pvp_summary(realm: str, name: str, region: str) -> dict:
     return await blizzard_get(f"/profile/wow/character/{realm_slug(realm)}/{name.lower()}/pvp-summary", region)
+
+async def get_character_media(realm: str, name: str, region: str) -> dict:
+    return await blizzard_get(f"/profile/wow/character/{realm_slug(realm)}/{name.lower()}/character-media", region)
+
+# ─────────────────────────────────────────
+#  GEAR ASSETS — icons, realm list, enchant wording
+# ─────────────────────────────────────────
+ICON_CACHE_SIZE = 400
+REALM_CACHE_TTL = 6 * 3600     # realm lists barely move; refresh a few times a day
+ASSET_TIMEOUT   = aiohttp.ClientTimeout(total=12)
+PORTRAIT_MAX    = 2_000_000    # a full-body render is well under 1 MB
+
+_icon_cache: dict  = {}
+_realm_cache: dict = {}
+
+# "|A:Professions-ChatIcon-Quality-12-Tier2:20:20|a" is a WoW texture atlas tag
+# the API leaves inside the display string.
+_ATLAS_RE   = re.compile(r"\|A:[^|]*\|a")
+_ENCHANT_RE = re.compile(r"^Enchanted:\s*(?:Enchant\s+[\w\- ]+?\s+-\s+)?")
+
+
+def enchant_label(display_string: str) -> str:
+    """Strips the atlas tag and the "Enchanted: Enchant Ring - " boilerplate."""
+    return _ENCHANT_RE.sub("", _ATLAS_RE.sub("", display_string or "")).strip()
+
+
+def plain_display(display_string: str) -> str:
+    return _ATLAS_RE.sub("", display_string or "").strip()
+
+
+async def download_bytes(url: str, limit: int = PORTRAIT_MAX):
+    """Whole asset or nothing — a partial image is worse than no image."""
+    try:
+        async with aiohttp.ClientSession(timeout=ASSET_TIMEOUT) as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    return None
+                if (response.content_length or 0) > limit:
+                    return None
+                data = await response.read()
+                return data if len(data) <= limit else None
+    except Exception:
+        return None
+
+
+async def get_item_icon(item_id: int, region: str):
+    """Icon bytes for an item, cached — the media lookup costs one call each."""
+    if not item_id:
+        return None
+    if item_id in _icon_cache:
+        return _icon_cache[item_id]
+    icon = None
+    try:
+        media = await blizzard_get(f"/data/wow/media/item/{item_id}", region, f"static-{region}")
+        for asset in media.get("assets", []):
+            if asset.get("key") == "icon":
+                icon = await download_bytes(asset["value"])
+                break
+    except Exception:
+        icon = None
+    _icon_cache[item_id] = icon
+    if len(_icon_cache) > ICON_CACHE_SIZE:
+        _icon_cache.pop(next(iter(_icon_cache)))
+    return icon
+
+
+async def get_realms(region: str) -> list:
+    """(name, slug) for every realm in the region, refreshed a few times a day."""
+    now    = datetime.now(timezone.utc).timestamp()
+    cached = _realm_cache.get(region)
+    if cached and now < cached[0]:
+        return cached[1]
+    try:
+        data   = await blizzard_get("/data/wow/realm/index", region, f"dynamic-{region}")
+        realms = sorted(
+            (r["name"], r["slug"]) for r in data.get("realms", [])
+            if isinstance(r.get("name"), str) and r.get("slug")
+        )
+    except Exception as exc:
+        print(f"[WARN] Realm index failed for {region}: {exc}")
+        return cached[1] if cached else []
+    _realm_cache[region] = (now + REALM_CACHE_TTL, realms)
+    return realms
+
+
+async def realm_autocomplete(interaction: discord.Interaction, current: str) -> list:
+    """Realm suggestions for whichever region is selected in the same command."""
+    region = getattr(interaction.namespace, "region", None) or "eu"
+    realms = await get_realms(region if region in ("eu", "us") else "eu")
+    needle = current.strip().lower()
+    if needle:
+        realms = [r for r in realms if needle in r[0].lower()]
+        realms.sort(key=lambda r: (not r[0].lower().startswith(needle), r[0]))
+    return [app_commands.Choice(name=name, value=slug) for name, slug in realms[:25]]
+
+
+async def build_gear_slots(equipment: dict, region: str):
+    """Slot data for the sheet renderer plus the enchant and gem summary."""
+    items = {item["slot"]["type"]: item for item in equipment.get("equipped_items", [])}
+
+    # Every icon in one round trip rather than sixteen sequential lookups.
+    wanted = []
+    for item in items.values():
+        wanted.append((item.get("item") or {}).get("id"))
+        for socket in item.get("sockets", []):
+            wanted.append((socket.get("item") or {}).get("id"))
+    unique  = [i for i in dict.fromkeys(wanted) if i]
+    fetched = await asyncio.gather(*(get_item_icon(i, region) for i in unique))
+    icons   = dict(zip(unique, fetched))
+
+    slots, enchant_lines, gem_lines = {}, [], []
+    total_ilvl = count = 0
+
+    for slot_type in SLOT_ORDER:
+        item  = items.get(slot_type)
+        label = slot_type.replace("_", " ").title()
+        if not item:
+            slots[slot_type] = {"label": label}
+            continue
+
+        label    = (item.get("slot") or {}).get("name") or label
+        ilvl     = (item.get("level") or {}).get("value", 0)
+        enchants = [enchant_label(e.get("display_string", "")) for e in item.get("enchantments", [])]
+        enchants = [e for e in enchants if e]
+
+        slots[slot_type] = {
+            "label":    label,
+            "name":     item.get("name", ""),
+            "ilvl":     ilvl,
+            "quality":  (item.get("quality") or {}).get("type", "COMMON"),
+            "icon":     icons.get((item.get("item") or {}).get("id")),
+            "enchants": enchants,
+            "gems":     [
+                icons[(socket.get("item") or {}).get("id")]
+                for socket in item.get("sockets", [])
+                if icons.get((socket.get("item") or {}).get("id"))
+            ],
+        }
+
+        if ilvl:
+            total_ilvl += ilvl
+            count      += 1
+        for text in enchants:
+            enchant_lines.append(f"✨ **{label}** — {text}")
+        for socket in item.get("sockets", []):
+            bonus = plain_display(socket.get("display_string", ""))
+            if bonus:
+                gem_lines.append(f"💎 **{label}** — {bonus}")
+
+    avg_ilvl = round(total_ilvl / count) if count else 0
+    return slots, enchant_lines, gem_lines, avg_ilvl
 
 # ─────────────────────────────────────────
 #  RAIDERIO API
@@ -701,13 +858,14 @@ class WowGroup(app_commands.Group):
     @app_commands.command(name="check", description="Full character check: profile, gear, stats, M+, raids, PvP, achievements")
     @app_commands.describe(
         name="Character Name",
-        realm="Realm (e.g. Silvermoon, Stormscale, twisting-nether)",
+        realm="Realm — start typing and pick from the list",
         region="Region (default: eu)",
     )
     @app_commands.choices(region=[
         app_commands.Choice(name="🇪🇺 EU", value="eu"),
         app_commands.Choice(name="🇺🇸 US", value="us"),
     ])
+    @app_commands.autocomplete(realm=realm_autocomplete)
     async def check(self, interaction: discord.Interaction, name: str, realm: str, region: str = "eu"):
         await interaction.response.defer()
 
@@ -721,17 +879,18 @@ class WowGroup(app_commands.Group):
                 return None
 
         if blizzard_ok:
-            summary, equipment, statistics, achievements, pvp, rio, wcl = await asyncio.gather(
+            summary, equipment, statistics, achievements, pvp, char_media, rio, wcl = await asyncio.gather(
                 safe(get_summary(realm, name, region)),
                 safe(get_equipment(realm, name, region)),
                 safe(get_statistics(realm, name, region)),
                 safe(get_achievements(realm, name, region)),
                 safe(get_pvp_summary(realm, name, region)),
+                safe(get_character_media(realm, name, region)),
                 safe(get_raiderio(realm, name, region)),
                 safe(get_wcl_character(realm, name, region)) if wcl_ok else asyncio.sleep(0, result=None),
             )
         else:
-            summary = equipment = statistics = achievements = pvp = None
+            summary = equipment = statistics = achievements = pvp = char_media = None
             rio, wcl = await asyncio.gather(
                 safe(get_raiderio(realm, name, region)),
                 safe(get_wcl_character(realm, name, region)) if wcl_ok else asyncio.sleep(0, result=None),
@@ -767,7 +926,8 @@ class WowGroup(app_commands.Group):
         if rio and rio.get("thumbnail_url"):
             thumb_url = f"https://render.worldofwarcraft.com/{region}/" + rio["thumbnail_url"]
 
-        embeds = []
+        embeds      = []
+        attachments = []
 
         # ══════════════════════════════════
         #  EMBED 1 — PROFILE + GEAR + STATS
@@ -817,32 +977,50 @@ class WowGroup(app_commands.Group):
                 f"*(Blizzard API not configured)*"
             ), inline=False)
 
-        # ── Gear ──────────────────────────────────────────────
+        # ── Gear ──────────────────────────────────────────
+        # Discord cannot place images inside field text, so the gear leaves as
+        # one rendered character sheet attached to this embed.
         if equipment:
-            items_by_slot = {item["slot"]["type"]: item for item in equipment.get("equipped_items", [])}
-            gear_lines = []
-            total_ilvl = 0
-            count      = 0
-            for slot in SLOT_ORDER:
-                if slot not in items_by_slot:
-                    continue
-                item      = items_by_slot[slot]
-                slot_name = item.get("slot", {}).get("name", slot)
-                item_name = item.get("name", "Unknown")
-                item_ilvl = item.get("level", {}).get("value", 0)
-                quality   = item.get("quality", {}).get("type", "COMMON")
-                s_emoji   = SLOT_EMOJIS.get(slot, "🔹")
-                q_icon    = QUALITY_ICONS.get(quality, "⚪")
-                gear_lines.append(f"{s_emoji} **{slot_name}** {q_icon} {item_name} `{item_ilvl}`")
-                if item_ilvl:
-                    total_ilvl += item_ilvl
-                    count      += 1
+            slots, enchant_lines, gem_lines, avg_ilvl = await build_gear_slots(equipment, region)
 
-            if gear_lines:
-                mid     = len(gear_lines) // 2
-                avg_ilvl = round(total_ilvl / count) if count else 0
-                e1.add_field(name=f"🛡️ Gear  *(Ø {avg_ilvl} iLvl)*", value="\n".join(gear_lines[:mid]), inline=True)
-                e1.add_field(name="\u200b",                            value="\n".join(gear_lines[mid:]), inline=True)
+            portrait = None
+            for asset in (char_media or {}).get("assets", []):
+                if asset.get("key") == "main-raw":
+                    portrait = await download_bytes(asset["value"])
+                    break
+
+            sheet = gear_render.render_sheet(
+                header={
+                    "title":    f"{char_name} — {realm_name} ({region.upper()})",
+                    "subtitle": f"{char_class}  ·  Ø {avg_ilvl} iLvl",
+                },
+                slots=slots,
+                portrait=portrait,
+            )
+
+            if sheet:
+                attachments.append(discord.File(io.BytesIO(sheet), filename="character.png"))
+                e1.set_image(url="attachment://character.png")
+                e1.set_thumbnail(url=None)   # the sheet already shows the full body
+            else:
+                # Pillow unavailable — fall back to the list so gear is never lost.
+                lines_out = [
+                    f"**{slots[s]['label']}** {slots[s].get('name', '')} `{slots[s].get('ilvl', 0)}`"
+                    for s in SLOT_ORDER if slots.get(s, {}).get("name")
+                ]
+                half = len(lines_out) // 2 or len(lines_out)
+                e1.add_field(name=f"🛡️ Gear  *(Ø {avg_ilvl} iLvl)*",
+                             value="\n".join(lines_out[:half]) or "—", inline=True)
+                if lines_out[half:]:
+                    e1.add_field(name="​", value="\n".join(lines_out[half:]), inline=True)
+
+            shown = (enchant_lines + gem_lines)[:12]
+            if shown:
+                e1.add_field(
+                    name=f"✨ Enchants & Gems  *({len(enchant_lines)} enchanted · {len(gem_lines)} gems)*",
+                    value="\n".join(shown)[:1024],
+                    inline=False,
+                )
 
         # ── Secondary stats ─────────────────────────────────────
         if statistics:
@@ -1088,7 +1266,7 @@ class WowGroup(app_commands.Group):
         e4.set_footer(text="WoW Bot · Page 4/4  —  Raid Logs  |  Data: Blizzard API + Raider.IO + Warcraft Logs")
         embeds.append(e4)
 
-        await interaction.followup.send(embeds=embeds)
+        await interaction.followup.send(embeds=embeds, files=attachments or discord.utils.MISSING)
 
     # ══════════════════════════════════════
     #  /wow compare
@@ -1096,15 +1274,16 @@ class WowGroup(app_commands.Group):
     @app_commands.command(name="compare", description="Compare two characters side by side")
     @app_commands.describe(
         name1="First character",
-        realm1="Realm of the first character",
+        realm1="Realm of the first character — pick from the list",
         name2="Second character",
-        realm2="Realm of the second character",
+        realm2="Realm of the second character — pick from the list",
         region="Region (default: eu)",
     )
     @app_commands.choices(region=[
         app_commands.Choice(name="🇪🇺 EU", value="eu"),
         app_commands.Choice(name="🇺🇸 US", value="us"),
     ])
+    @app_commands.autocomplete(realm1=realm_autocomplete, realm2=realm_autocomplete)
     async def compare(
         self,
         interaction: discord.Interaction,
