@@ -1350,6 +1350,17 @@ class WowGroup(app_commands.Group):
         #  EMBED 1 — PROFILE + GEAR + STATS
         # ══════════════════════════════════
         e1 = discord.Embed(color=color)
+        # The description sits directly under the author line, which is the
+        # most visible spot an embed has for a link.
+        profile_links = []
+        if rio and rio.get("profile_url"):
+            profile_links.append(f"**[▸ Raider.IO]({rio['profile_url']})**")
+        if wcl and wcl.get("id"):
+            profile_links.append(
+                "**[▸ Warcraft Logs]"
+                f"(https://www.warcraftlogs.com/character/id/{wcl['id']})**")
+        if profile_links:
+            e1.description = "  ".join(profile_links)
         e1.set_author(
             name=f"{class_emoji}  {char_name}  —  {realm_name} ({region.upper()})",
             icon_url=thumb_url,
@@ -1456,19 +1467,8 @@ class WowGroup(app_commands.Group):
             e1.add_field(name="🔮 Mastery",     value=f"**{fmt_stat(mastery)}**", inline=True)
             e1.add_field(name="🛡️ Versatility", value=f"**{vers_dmg:.1f}% ({vers:,})**", inline=True)
             e1.add_field(name="📊 Item Level",  value=f"**{ilvl_eq}** *(avg {ilvl_avg})*" if summary else "—", inline=True)
-            e1.add_field(name="🗝️ M+ Rating",  value=f"**{mp_score:.0f}**", inline=True)
 
 
-        # Both profiles belong where the character is introduced.
-        profile_links = []
-        if rio and rio.get("profile_url"):
-            profile_links.append(f"[Raider.IO]({rio['profile_url']})")
-        if wcl and wcl.get("id"):
-            profile_links.append(
-                f"[Warcraft Logs](https://www.warcraftlogs.com/character/id/{wcl['id']})")
-        if profile_links:
-            e1.add_field(name="🔗 Profiles", value="  ·  ".join(profile_links),
-                         inline=False)
 
         embeds.append(e1)
 
