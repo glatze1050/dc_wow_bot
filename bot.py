@@ -697,11 +697,11 @@ async def dungeon_rankings(realm: str, name: str, region: str) -> list:
         dungeon = (entry.get("encounter") or {}).get("name", "?")
         rows.append({
             "dungeon": dungeon,
-            "damage":  entry.get("rankPercent"),
-            "healing": (healing_by.get(dungeon) or {}).get("rankPercent"),
-            "speed":   (speed_by.get(dungeon) or {}).get("rankPercent"),
-            "dps":     entry.get("bestAmount") or 0,
-            "runs":    entry.get("totalKills") or 0,
+            "damage":  wcl_number(entry.get("rankPercent")),
+            "healing": wcl_number((healing_by.get(dungeon) or {}).get("rankPercent")),
+            "speed":   wcl_number((speed_by.get(dungeon) or {}).get("rankPercent")),
+            "dps":     wcl_number(entry.get("bestAmount")) or 0,
+            "runs":    wcl_number(entry.get("totalKills")) or 0,
         })
     rows.sort(key=lambda r: r["damage"] or 0, reverse=True)
     return rows
@@ -749,6 +749,11 @@ def read_zone_rankings(wcl: dict) -> dict:
     return raw or {}
 
 
+def wcl_number(value):
+    """Warcraft Logs writes "-" where a character is unranked."""
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 def wcl_table_data(zone: dict):
     """(summary, rows) shaped the way the Warcraft Logs character page reads."""
     rows = []
@@ -756,20 +761,20 @@ def wcl_table_data(zone: dict):
         stars = entry.get("allStars") or {}
         rows.append({
             "boss":       (entry.get("encounter") or {}).get("name", "?"),
-            "best":       entry.get("rankPercent"),
-            "median":     entry.get("medianPercent"),
-            "dps":        entry.get("bestAmount") or 0,
-            "kills":      entry.get("totalKills") or 0,
-            "fastest_ms": entry.get("fastestKill"),
-            "points":     stars.get("points"),
-            "rank":       stars.get("rank"),
+            "best":       wcl_number(entry.get("rankPercent")),
+            "median":     wcl_number(entry.get("medianPercent")),
+            "dps":        wcl_number(entry.get("bestAmount")) or 0,
+            "kills":      wcl_number(entry.get("totalKills")) or 0,
+            "fastest_ms": wcl_number(entry.get("fastestKill")),
+            "points":     wcl_number(stars.get("points")),
+            "rank":       wcl_number(stars.get("rank")),
         })
     summary = {
         "best":   zone.get("bestPerformanceAverage"),
         "median": zone.get("medianPerformanceAverage"),
         "kills":  sum(r["kills"] for r in rows),
         "points": sum(r["points"] or 0 for r in rows),
-        "rank":   min((r["rank"] for r in rows if r["rank"]), default=0),
+        "rank":   min((r["rank"] for r in rows if r["rank"]), default=0) if rows else 0,
     }
     return summary, rows
 

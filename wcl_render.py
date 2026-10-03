@@ -46,7 +46,13 @@ PARSE_COLOURS = (
 )
 
 
+def number(value):
+    """Defensive twin of the caller's coercion: "-" must never reach a format."""
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 def parse_colour(percent):
+    percent = number(percent)
     if percent is None:
         return TEXT_FAINT
     for threshold, colour in PARSE_COLOURS:
@@ -56,7 +62,9 @@ def parse_colour(percent):
 
 
 def kill_time(milliseconds) -> str:
-    if not milliseconds:
+    milliseconds = number(milliseconds)
+    # Keystone runs come back with a negative placeholder instead of a time.
+    if not milliseconds or milliseconds <= 0:
         return "—"
     seconds = int(milliseconds // 1000)
     return f"{seconds // 60}:{seconds % 60:02d}"
@@ -92,18 +100,18 @@ def render_wcl(header: dict, summary: dict, bosses: list) -> bytes | None:
     top = HEADER_H
     draw.rectangle([MARGIN, top, WIDTH - MARGIN, top + SUMMARY_H - 16], fill=PANEL)
 
-    best = summary.get("best")
+    best = number(summary.get("best"))
     draw.text((MARGIN + 24, top + 16), "BEST PERF. AVG", font=fonts["caption"], fill=TEXT_DIM)
     draw.text((MARGIN + 24, top + 38), "—" if best is None else f"{best:.1f}",
               font=fonts["huge"], fill=parse_colour(best))
 
     counters = (
         ("Median Avg",
-         "—" if summary.get("median") is None else f"{summary['median']:.1f}",
+         "—" if number(summary.get("median")) is None else f"{number(summary['median']):.1f}",
          parse_colour(summary.get("median"))),
         ("Kills Logged", str(summary.get("kills", 0)), TEXT),
-        ("All Star Points", f"{summary.get('points', 0):.0f}", TEXT),
-        ("Rank", f"{summary.get('rank', 0):,}" if summary.get("rank") else "—", TEXT),
+        ("All Star Points", f"{number(summary.get('points')) or 0:.0f}", TEXT),
+        ("Rank", f"{number(summary.get('rank')) or 0:,}" if number(summary.get("rank")) else "—", TEXT),
     )
     slot_w = (WIDTH - MARGIN * 2 - 300) // len(counters)
     for index, (label, value, colour) in enumerate(counters):
@@ -126,18 +134,18 @@ def render_wcl(header: dict, summary: dict, bosses: list) -> bytes | None:
         if index % 2:
             draw.rectangle([MARGIN, y, WIDTH - MARGIN, y + ROW_H], fill=ROW_ALT)
 
-        killed = (boss.get("kills") or 0) > 0
-        best_p = boss.get("best")
+        killed = (number(boss.get("kills")) or 0) > 0
+        best_p = number(boss.get("best"))
         plain  = TEXT if killed else TEXT_FAINT
         values = (
             fit(draw, boss.get("boss", "?"), fonts["cell"], COLUMNS[0][1] - 24),
             "—" if best_p is None else f"{best_p:.0f}",
-            "—" if not boss.get("dps") else f"{boss['dps']:,.0f}",
-            str(boss.get("kills") or 0),
-            kill_time(boss.get("fastest_ms")),
-            "—" if boss.get("median") is None else f"{boss['median']:.0f}",
-            "—" if not boss.get("points") else f"{boss['points']:.1f}",
-            "—" if not boss.get("rank") else f"{boss['rank']:,}",
+            "—" if not number(boss.get("dps")) else f"{number(boss['dps']):,.0f}",
+            str(number(boss.get("kills")) or 0),
+            kill_time(number(boss.get("fastest_ms"))),
+            "—" if number(boss.get("median")) is None else f"{number(boss['median']):.0f}",
+            "—" if not number(boss.get("points")) else f"{number(boss['points']):.1f}",
+            "—" if not number(boss.get("rank")) else f"{number(boss['rank']):,}",
         )
         colours = (plain, parse_colour(best_p), plain, plain, plain,
                    parse_colour(boss.get("median")), plain,
@@ -195,11 +203,11 @@ def render_dungeons(header: dict, rows: list) -> bytes | None:
             draw.rectangle([MARGIN, y, DUNGEON_WIDTH - MARGIN, y + ROW_H], fill=ROW_ALT)
         values = (
             fit(draw, row.get("dungeon", "?"), fonts["cell"], DUNGEON_COLUMNS[0][1] - 24),
-            "—" if row.get("damage") is None else f"{row['damage']:.0f}",
-            "—" if row.get("healing") is None else f"{row['healing']:.0f}",
-            "—" if row.get("speed") is None else f"{row['speed']:.0f}",
-            "—" if not row.get("dps") else f"{row['dps']:,.0f}",
-            str(row.get("runs") or 0),
+            "—" if number(row.get("damage")) is None else f"{number(row['damage']):.0f}",
+            "—" if number(row.get("healing")) is None else f"{number(row['healing']):.0f}",
+            "—" if number(row.get("speed")) is None else f"{number(row['speed']):.0f}",
+            "—" if not number(row.get("dps")) else f"{number(row['dps']):,.0f}",
+            str(number(row.get("runs")) or 0),
         )
         colours = (TEXT, parse_colour(row.get("damage")), parse_colour(row.get("healing")),
                    parse_colour(row.get("speed")), TEXT, TEXT_DIM)
