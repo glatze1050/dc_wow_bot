@@ -22,7 +22,7 @@ except ImportError:  # the bot stays usable without the optional dependency
 # ─────────────────────────────────────────
 #  LAYOUT
 # ─────────────────────────────────────────
-WIDTH    = 900
+WIDTH    = 1140   # with the 856 px height this is 4:3, the widest Discord shows
 PADDING  = 22
 ICON     = 72
 ROW_STEP = 84
@@ -32,7 +32,7 @@ BORDER   = 3
 
 LEFT_X       = PADDING
 RIGHT_X      = WIDTH - PADDING - ICON
-PORTRAIT_BOX = (270, HEADER_H + 10, 630, HEADER_H + 10 + 8 * ROW_STEP - 10)
+PORTRAIT_BOX = (320, HEADER_H + 10, 820, HEADER_H + 10 + 8 * ROW_STEP - 10)
 
 # Matches the Discord dark embed background so the image reads as one block.
 BG          = (43, 45, 49)
