@@ -29,3 +29,6 @@ Thumbs.db
 
 # Claude local state
 .claude/
+
+# Pages rendered by the end-to-end check
+tests/output/
