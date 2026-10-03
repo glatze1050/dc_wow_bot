@@ -470,7 +470,8 @@ def remember_character(guild_id, name: str, realm: str, region: str, realm_name:
     if not guild_id or not name:
         return
     key   = str(guild_id)
-    entry = {"name": name, "realm": realm, "region": region, "realm_name": realm_name or realm}
+    entry = {"name": name, "realm": realm, "region": region, "realm_name": realm_name or realm,
+             "last_used": datetime.now(timezone.utc).date().isoformat()}
     ident = (name.lower(), realm.lower(), region)
     kept  = [
         e for e in character_history.get(key, [])
@@ -1841,6 +1842,42 @@ class WowSetupGroup(app_commands.Group):
         embed.set_footer(text="WoW Bot  ·  Setup Overview  ·  Visible to admins only")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="health", description="Show what the bot is holding in memory and on disk")
+    async def health(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            return await interaction.response.send_message(embed=error_embed("Administrators only."), ephemeral=True)
+
+        report = runtime_report()
+        embed  = discord.Embed(
+            title="🧮  WoW Bot  —  Runtime",
+            description=("Nothing the bot renders is written to disk; images are built in memory "
+                         "and handed straight to Discord.\n"
+                         + "━" * 46),
+            color=0x00FF98,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="🖼️ Item icons",
+                        value=f"**{report['icons']}** / {ICON_CACHE_SIZE}", inline=True)
+        embed.add_field(name="🏞️ Dungeon art",
+                        value=f"**{report['artwork']}** / {ART_CACHE_SIZE}", inline=True)
+        embed.add_field(name="📰 News previews",
+                        value=f"**{report['previews']}** / {NEWS_PREVIEW_CACHE}", inline=True)
+        embed.add_field(name="🔑 News keys",
+                        value=f"**{report['news_keys']}** / {NEWS_CACHE_SIZE}", inline=True)
+        embed.add_field(name="👥 Characters",
+                        value=f"**{report['characters']}** in {report['guilds']} guilds", inline=True)
+        embed.add_field(name="💾 Data file",
+                        value=f"**{report['data_kb']} KB**", inline=True)
+        embed.add_field(
+            name="⚙️ Housekeeping",
+            value=(f"Runs every **{HOUSEKEEPING_HOURS}h**: clears dungeon art, trims the caches "
+                   f"to their caps and forgets characters unused for {HISTORY_MAX_AGE} days."
+                   + (f"\nPeak memory **{report['memory_mb']} MB**." if report["memory_mb"] else "")),
+            inline=False,
+        )
+        embed.set_footer(text="WoW Bot  ·  Runtime  ·  Visible to admins only")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="news_test", description="Preview the latest news post without publishing it")
     async def news_test(self, interaction: discord.Interaction):
         if not is_admin(interaction):
@@ -1863,6 +1900,72 @@ class WowSetupGroup(app_commands.Group):
 # ─────────────────────────────────────────
 #  BACKGROUND TASKS
 # ─────────────────────────────────────────
+
+HOUSEKEEPING_HOURS  = 6
+HISTORY_MAX_AGE     = 90      # days a remembered character stays suggestable
+
+
+def runtime_report() -> dict:
+    """What the bot is holding on to, in numbers fit for a one-line log."""
+    report = {
+        "icons":      len(_icon_cache),
+        "artwork":    len(_art_cache),
+        "previews":   len(_preview_cache),
+        "news_keys":  len(seen_news),
+        "characters": sum(len(v) for v in character_history.values()),
+        "guilds":     len(character_history),
+        "data_kb":    round(os.path.getsize(DATA_FILE) / 1024, 1) if os.path.exists(DATA_FILE) else 0.0,
+        "memory_mb":  0.0,
+    }
+    try:                                      # Linux only, and only a hint
+        import resource
+        report["memory_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    except (ImportError, AttributeError):
+        pass
+    return report
+
+
+def prune_history() -> int:
+    """Forget characters nobody has looked up in a season."""
+    cutoff  = (datetime.now(timezone.utc) - timedelta(days=HISTORY_MAX_AGE)).date().isoformat()
+    removed = 0
+    for guild, entries in list(character_history.items()):
+        # Entries written before dates existed are kept; they age from now on.
+        kept = [e for e in entries if e.get("last_used", cutoff) >= cutoff][:CHARACTER_HISTORY_MAX]
+        removed += len(entries) - len(kept)
+        if kept:
+            character_history[guild] = kept
+        else:
+            del character_history[guild]
+    return removed
+
+
+@tasks.loop(hours=HOUSEKEEPING_HOURS)
+async def housekeeping():
+    """Keep the caches and the data file from drifting past their limits."""
+    global seen_news
+
+    # Dungeon art is the heavy one and is cheap to fetch again.
+    freed_art = len(_art_cache)
+    _art_cache.clear()
+
+    while len(_icon_cache) > ICON_CACHE_SIZE:
+        _icon_cache.pop(next(iter(_icon_cache)))
+    while len(_preview_cache) > NEWS_PREVIEW_CACHE:
+        _preview_cache.pop(next(iter(_preview_cache)))
+
+    dropped = prune_history()
+    before  = len(seen_news)
+    trim_seen_news()
+    save_data()
+
+    report = runtime_report()
+    print(f"[INFO] Housekeeping: released {freed_art} artwork, "
+          f"dropped {dropped} stale characters, trimmed {before - len(seen_news)} news keys | "
+          f"icons {report['icons']} · news {report['news_keys']} · "
+          f"characters {report['characters']} in {report['guilds']} guilds · "
+          f"data {report['data_kb']} KB · peak memory {report['memory_mb']} MB")
+
 
 @tasks.loop(hours=1)
 async def check_wow_news():
@@ -2067,6 +2170,7 @@ async def on_ready():
     await bot.tree.sync()
 
     check_wow_news.start()
+    housekeeping.start()
     weekly_reset_reminder.start()
     check_maintenance.start()
 
