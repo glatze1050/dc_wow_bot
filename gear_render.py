@@ -22,22 +22,23 @@ except ImportError:  # the bot stays usable without the optional dependency
 # ─────────────────────────────────────────
 #  LAYOUT
 # ─────────────────────────────────────────
-WIDTH    = 880
-PADDING  = 18
-ICON     = 56
-ROW_STEP = 66
-HEADER_H = 56
-GEM      = 18
-BORDER   = 2
+WIDTH    = 900
+PADDING  = 22
+ICON     = 72
+ROW_STEP = 84
+HEADER_H = 68
+GEM      = 22
+BORDER   = 3
 
 LEFT_X       = PADDING
 RIGHT_X      = WIDTH - PADDING - ICON
-PORTRAIT_BOX = (210, HEADER_H + 10, 670, HEADER_H + 10 + 8 * ROW_STEP - 10)
+PORTRAIT_BOX = (270, HEADER_H + 10, 630, HEADER_H + 10 + 8 * ROW_STEP - 10)
 
 # Matches the Discord dark embed background so the image reads as one block.
 BG          = (43, 45, 49)
 TEXT        = (220, 222, 228)
 TEXT_DIM    = (142, 146, 151)
+TEXT_FAINT  = (118, 122, 128)
 EMPTY_SLOT  = (54, 57, 63)
 ENCHANT_DOT = (30, 255, 0)
 OUTLINE     = (24, 25, 28)
@@ -58,7 +59,7 @@ QUALITY_COLORS = {
 LEFT_SLOTS   = ["HEAD", "NECK", "SHOULDER", "BACK", "CHEST", "WRIST", "HANDS", "WAIST"]
 RIGHT_SLOTS  = ["LEGS", "FEET", "FINGER_1", "FINGER_2", "TRINKET_1", "TRINKET_2"]
 BOTTOM_SLOTS = ["MAIN_HAND", "OFF_HAND"]
-BOTTOM_GAP   = 130      # wide enough for the item level and slot name between icons
+BOTTOM_GAP   = 155      # wide enough for the item level and slot name between icons
 
 FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -94,6 +95,16 @@ def _text_width(draw, text: str, font) -> int:
     return int(draw.textlength(text, font=font))
 
 
+def _fit(draw, text: str, font, limit: int) -> str:
+    """Trim a line to the column width; a necklace can carry four secondaries."""
+    if not text or _text_width(draw, text, font) <= limit:
+        return text
+    cut = text
+    while cut and _text_width(draw, cut + "…", font) > limit:
+        cut = cut[:-1]
+    return cut.rstrip(" ·+") + "…"
+
+
 def _open_icon(raw: bytes, size: int):
     """Decode a downloaded icon and square it off to `size`."""
     image = Image.open(io.BytesIO(raw)).convert("RGBA")
@@ -102,7 +113,7 @@ def _open_icon(raw: bytes, size: int):
     return image
 
 
-def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, fonts: dict):
+def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, fonts: dict, room: int):
     """One item: icon, quality border, item level, slot name, enchant, gems."""
     colour = QUALITY_COLORS.get(slot.get("quality") or "COMMON", QUALITY_COLORS["COMMON"])
 
@@ -122,22 +133,29 @@ def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, font
     ilvl  = slot.get("ilvl")
     label = str(ilvl) if ilvl else "—"
     slot_label = slot.get("label", "")
-    text_y = y + 6
-    name_y = text_y + 21
+    text_y  = y + 8
+    name_y  = text_y + 24
+    stats_y = name_y + 22
+    stats   = _fit(draw, slot.get("stats", ""), fonts["stats"], room)
 
     if align_right:
         draw.text((x - 10 - _text_width(draw, label, fonts["ilvl"]), text_y),
                   label, font=fonts["ilvl"], fill=colour)
         draw.text((x - 10 - _text_width(draw, slot_label, fonts["slot"]), name_y),
                   slot_label, font=fonts["slot"], fill=TEXT_DIM)
+        if stats:
+            draw.text((x - 10 - _text_width(draw, stats, fonts["stats"]), stats_y),
+                      stats, font=fonts["stats"], fill=TEXT_FAINT)
     else:
         draw.text((x + ICON + 10, text_y), label, font=fonts["ilvl"], fill=colour)
         draw.text((x + ICON + 10, name_y), slot_label, font=fonts["slot"], fill=TEXT_DIM)
+        if stats:
+            draw.text((x + ICON + 10, stats_y), stats, font=fonts["stats"], fill=TEXT_FAINT)
 
     # Enchanted items get the same green marker the character sheet uses.
     if slot.get("enchants"):
-        cx, cy = x + ICON - 7, y + 7
-        draw.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=ENCHANT_DOT, outline=OUTLINE, width=2)
+        cx, cy = x + ICON - 9, y + 9
+        draw.ellipse([cx - 8, cy - 8, cx + 8, cy + 8], fill=ENCHANT_DOT, outline=OUTLINE, width=2)
 
     # Gems sit along the bottom edge of the icon.
     for index, gem_bytes in enumerate((slot.get("gems") or [])[:3]):
@@ -184,7 +202,8 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None) -> by
 
     canvas = Image.new("RGBA", (WIDTH, height), BG + (255,))
     draw   = ImageDraw.Draw(canvas)
-    fonts  = {"title": _font(22), "sub": _font(15), "ilvl": _font(16), "slot": _font(12)}
+    fonts  = {"title": _font(28), "sub": _font(19), "ilvl": _font(20),
+              "slot": _font(15), "stats": _font(13)}
 
     if portrait:
         try:
@@ -192,26 +211,28 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None) -> by
         except Exception:
             pass
 
-    draw.text((PADDING, 14), header.get("title", ""), font=fonts["title"], fill=TEXT)
+    draw.text((PADDING, 18), header.get("title", ""), font=fonts["title"], fill=TEXT)
     subtitle = header.get("subtitle", "")
     if subtitle:
         width = _text_width(draw, subtitle, fonts["sub"])
-        draw.text((WIDTH - PADDING - width, 21), subtitle, font=fonts["sub"], fill=TEXT_DIM)
+        draw.text((WIDTH - PADDING - width, 27), subtitle, font=fonts["sub"], fill=TEXT_DIM)
 
     for index, slot_type in enumerate(LEFT_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   LEFT_X, HEADER_H + 10 + index * ROW_STEP, False, fonts)
+                   LEFT_X, HEADER_H + 10 + index * ROW_STEP, False, fonts,
+                   PORTRAIT_BOX[0] - LEFT_X - ICON - 20)
 
     for index, slot_type in enumerate(RIGHT_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   RIGHT_X, HEADER_H + 10 + index * ROW_STEP, True, fonts)
+                   RIGHT_X, HEADER_H + 10 + index * ROW_STEP, True, fonts,
+                   RIGHT_X - PORTRAIT_BOX[2] - 20)
 
     weapons_y = HEADER_H + 10 + body_h
     step      = ICON + BOTTOM_GAP
     start_x   = WIDTH // 2 - (len(BOTTOM_SLOTS) * step - BOTTOM_GAP) // 2
     for index, slot_type in enumerate(BOTTOM_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   start_x + index * step, weapons_y, False, fonts)
+                   start_x + index * step, weapons_y, False, fonts, BOTTOM_GAP - 14)
 
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, format="PNG", optimize=True)

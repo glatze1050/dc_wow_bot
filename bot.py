@@ -115,6 +115,7 @@ def load_data() -> dict:
         "maint_channel": None,
         "seen_news":     [],
         "news_schema":   0,
+        "characters":    {},
     }
 
 def save_data():
@@ -125,6 +126,7 @@ def save_data():
             "maint_channel": maint_channel_id,
             "seen_news":     seen_news,
             "news_schema":   news_schema,
+            "characters":    character_history,
         }, f, indent=2)
 
 _data            = load_data()
@@ -133,6 +135,7 @@ reset_channel_id = _data.get("reset_channel", None)
 maint_channel_id = _data.get("maint_channel", None)
 seen_news: list  = _data.get("seen_news",     [])
 news_schema: int = _data.get("news_schema",   0)
+character_history: dict = _data.get("characters", {})
 
 # ─────────────────────────────────────────
 #  BLIZZARD TOKEN CACHE
@@ -267,6 +270,16 @@ PORTRAIT_MAX    = 2_000_000    # a full-body render is well under 1 MB
 _icon_cache: dict  = {}
 _realm_cache: dict = {}
 
+SECONDARY_STATS = {
+    "CRIT_RATING":    "Crit",
+    "HASTE_RATING":   "Haste",
+    "MASTERY_RATING": "Mastery",
+    "VERSATILITY":    "Vers",
+}
+
+# One region's CDN occasionally returns 403 for a file the others serve.
+_ICON_REGION_RE = re.compile(r"/(eu|us|kr|tw)/icons/")
+
 # "|A:Professions-ChatIcon-Quality-12-Tier2:20:20|a" is a WoW texture atlas tag
 # the API leaves inside the display string.
 _ATLAS_RE   = re.compile(r"\|A:[^|]*\|a")
@@ -297,6 +310,32 @@ async def download_bytes(url: str, limit: int = PORTRAIT_MAX):
         return None
 
 
+def icon_url_variants(url: str) -> list:
+    """The same icon on every regional host, primary first."""
+    match = _ICON_REGION_RE.search(url or "")
+    if not match:
+        return [url] if url else []
+    variants = [url]
+    for other in ("us", "eu", "kr"):
+        if other != match.group(1):
+            variants.append(url[:match.start(1)] + other + url[match.end(1):])
+    return variants
+
+
+def secondary_stat_line(item: dict) -> str:
+    """'+79 Haste · +112 Vers' — off-spec stats are flagged and left out."""
+    found = []
+    for stat in item.get("stats", []):
+        if stat.get("is_negated"):
+            continue
+        short = SECONDARY_STATS.get((stat.get("type") or {}).get("type", ""))
+        if short:
+            found.append((stat.get("value", 0) or 0, short))
+    # Two fit the column; a necklace can carry four and would overflow.
+    found.sort(key=lambda pair: pair[0], reverse=True)
+    return " · ".join(f"+{value} {name}" for value, name in found[:2])
+
+
 async def get_item_icon(item_id: int, region: str):
     """Icon bytes for an item, cached — the media lookup costs one call each."""
     if not item_id:
@@ -307,9 +346,13 @@ async def get_item_icon(item_id: int, region: str):
     try:
         media = await blizzard_get(f"/data/wow/media/item/{item_id}", region, f"static-{region}")
         for asset in media.get("assets", []):
-            if asset.get("key") == "icon":
-                icon = await download_bytes(asset["value"])
-                break
+            if asset.get("key") != "icon":
+                continue
+            for candidate in icon_url_variants(asset["value"]):
+                icon = await download_bytes(candidate)
+                if icon:
+                    break
+            break
     except Exception:
         icon = None
     _icon_cache[item_id] = icon
@@ -335,6 +378,48 @@ async def get_realms(region: str) -> list:
         return cached[1] if cached else []
     _realm_cache[region] = (now + REALM_CACHE_TTL, realms)
     return realms
+
+
+CHARACTER_HISTORY_MAX = 50      # per guild, most recently looked up first
+
+
+def remember_character(guild_id, name: str, realm: str, region: str, realm_name: str = ""):
+    """Record a lookup so the next person can pick the name from a list."""
+    if not guild_id or not name:
+        return
+    key   = str(guild_id)
+    entry = {"name": name, "realm": realm, "region": region, "realm_name": realm_name or realm}
+    ident = (name.lower(), realm.lower(), region)
+    kept  = [
+        e for e in character_history.get(key, [])
+        if (e.get("name", "").lower(), e.get("realm", "").lower(), e.get("region")) != ident
+    ]
+    kept.insert(0, entry)
+    character_history[key] = kept[:CHARACTER_HISTORY_MAX]
+    save_data()
+
+
+def recall_character(guild_id, name: str):
+    """The most recent realm this guild used for that character name."""
+    for entry in character_history.get(str(guild_id), []):
+        if entry.get("name", "").lower() == (name or "").lower():
+            return entry
+    return None
+
+
+async def character_autocomplete(interaction: discord.Interaction, current: str) -> list:
+    """Characters this server has looked up before, most recent first."""
+    entries = character_history.get(str(interaction.guild_id), [])
+    needle  = current.strip().lower()
+    if needle:
+        entries = [e for e in entries if needle in e.get("name", "").lower()]
+    return [
+        app_commands.Choice(
+            name=f"{e['name']} — {e.get('realm_name') or e['realm']} ({(e.get('region') or 'eu').upper()})"[:100],
+            value=e["name"],
+        )
+        for e in entries[:25]
+    ]
 
 
 async def realm_autocomplete(interaction: discord.Interaction, current: str) -> list:
@@ -381,6 +466,7 @@ async def build_gear_slots(equipment: dict, region: str):
             "label":    label,
             "name":     item.get("name", ""),
             "ilvl":     ilvl,
+            "stats":    secondary_stat_line(item),
             "quality":  (item.get("quality") or {}).get("type", "COMMON"),
             "icon":     icons.get((item.get("item") or {}).get("id")),
             "enchants": enchants,
@@ -858,16 +944,27 @@ class WowGroup(app_commands.Group):
     @app_commands.command(name="check", description="Full character check: profile, gear, stats, M+, raids, PvP, achievements")
     @app_commands.describe(
         name="Character Name",
-        realm="Realm — start typing and pick from the list",
+        realm="Realm — pick from the list; leave empty to reuse the last one",
         region="Region (default: eu)",
     )
     @app_commands.choices(region=[
         app_commands.Choice(name="🇪🇺 EU", value="eu"),
         app_commands.Choice(name="🇺🇸 US", value="us"),
     ])
-    @app_commands.autocomplete(realm=realm_autocomplete)
-    async def check(self, interaction: discord.Interaction, name: str, realm: str, region: str = "eu"):
+    @app_commands.autocomplete(name=character_autocomplete, realm=realm_autocomplete)
+    async def check(self, interaction: discord.Interaction, name: str, realm: str = "", region: str = "eu"):
         await interaction.response.defer()
+
+        # A name picked from the history already knows where it lives.
+        if not realm:
+            remembered = recall_character(interaction.guild_id, name)
+            if not remembered:
+                return await interaction.followup.send(embed=error_embed(
+                    f"No realm given for **{name}**, and this server has not looked it up before.\n"
+                    "Pick a realm from the list."
+                ))
+            realm  = remembered["realm"]
+            region = remembered.get("region") or region
 
         blizzard_ok = bool(BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET)
         wcl_ok      = bool(WCL_CLIENT_ID and WCL_CLIENT_SECRET)
@@ -1268,6 +1365,9 @@ class WowGroup(app_commands.Group):
 
         await interaction.followup.send(embeds=embeds, files=attachments or discord.utils.MISSING)
 
+        # Only a lookup that actually resolved is worth suggesting next time.
+        remember_character(interaction.guild_id, char_name, realm, region, realm_name)
+
     # ══════════════════════════════════════
     #  /wow compare
     # ══════════════════════════════════════
@@ -1283,7 +1383,10 @@ class WowGroup(app_commands.Group):
         app_commands.Choice(name="🇪🇺 EU", value="eu"),
         app_commands.Choice(name="🇺🇸 US", value="us"),
     ])
-    @app_commands.autocomplete(realm1=realm_autocomplete, realm2=realm_autocomplete)
+    @app_commands.autocomplete(
+        name1=character_autocomplete, realm1=realm_autocomplete,
+        name2=character_autocomplete, realm2=realm_autocomplete,
+    )
     async def compare(
         self,
         interaction: discord.Interaction,
