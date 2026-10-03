@@ -16,6 +16,7 @@ from email.utils import parsedate_to_datetime
 from dotenv import load_dotenv
 
 import gear_render
+import render_util
 import mplus_render
 import wcl_render
 
@@ -192,6 +193,25 @@ def stat_percent(value) -> str:
     if isinstance(value, dict):
         return f"{value.get('value', value.get('rating_bonus_value', 0)):.1f}%"
     return f"{value:.1f}%" if isinstance(value, (int, float)) else str(value)
+
+
+def raid_cell(rio: dict):
+    """(raid name, progress) — the name labels the cell so the value stays short."""
+    best_score, best = -1, ("Raid", "—")
+    for raid_name, progress in ((rio or {}).get("raid_progression") or {}).items():
+        total = progress.get("total_bosses") or 0
+        if not total:
+            continue
+        for weight, (key, label) in enumerate(RAID_DIFFICULTIES):
+            killed = progress.get(key) or 0
+            if not killed:
+                continue
+            score = weight * 1000 + killed
+            if score > best_score:
+                best_score = score
+                best = (raid_name.replace(chr(45), chr(32)).title(),
+                        f"{killed}/{total} {label}")
+    return best
 
 
 def raid_status(rio: dict) -> str:
@@ -1455,19 +1475,24 @@ class WowGroup(app_commands.Group):
             # Rendered onto the sheet instead of listed as fields, so page one
             # reads like every other panel.
             ranks = mplus_ranks(rio)
+            raid_name, raid_done = raid_cell(rio)
+            plain = render_util.TEXT
             sheet_stats = [
-                ("Guild",        guild.strip() or "No guild"),
-                ("Spec",         spec),
-                ("Level",        str(level)),
-                ("Achievements", f"{ach_pts:,}"),
-                ("M+ Rating",    f"{mp_score:.0f}" if mp_score else "—"),
-                ("World",        f"#{ranks['world']:,}" if ranks["world"] else "—"),
-                ("Realm",        f"#{ranks['realm']:,}" if ranks["realm"] else "—"),
-                ("Raid",         plain_text(raid_standing.replace("**", ""), 40) or "—"),
-                ("Haste",        stat_percent(haste)),
-                ("Crit",         stat_percent(crit)),
-                ("Mastery",      stat_percent(mastery)),
-                ("Versatility",  f"{vers_dmg:.1f}%"),
+                ("Guild",        guild.strip() or "No guild", plain),
+                ("Spec",         spec, plain),
+                ("Level",        str(level), plain),
+                ("Achievements", f"{ach_pts:,}", plain),
+                ("M+ Rating",    f"{mp_score:.0f}" if mp_score else "—",
+                 render_util.score_colour(mp_score)),
+                ("World",        f"#{ranks['world']:,}" if ranks["world"] else "—",
+                 render_util.rank_colour(ranks["world"])),
+                ("Realm",        f"#{ranks['realm']:,}" if ranks["realm"] else "—",
+                 render_util.rank_colour(ranks["realm"])),
+                (raid_name,      raid_done, plain),
+                ("Haste",        stat_percent(haste), plain),
+                ("Crit",         stat_percent(crit), plain),
+                ("Mastery",      stat_percent(mastery), plain),
+                ("Versatility",  f"{vers_dmg:.1f}%", plain),
             ]
 
         # ── Gear ──────────────────────────────────────────
@@ -1669,6 +1694,21 @@ class WowGroup(app_commands.Group):
         # Only a lookup that actually resolved is worth suggesting next time.
         remember_character(interaction.guild_id, char_name, realm, region, realm_name)
 
+
+
+# ─────────────────────────────────────────
+#  ADMIN: /wowsetup
+# ─────────────────────────────────────────
+class WowSetupGroup(app_commands.Group):
+    def __init__(self):
+        # Must be passed in: assigning the attribute afterwards sets a name
+        # discord.py does not read, which left the group visible to everyone.
+        super().__init__(
+            name="wowsetup",
+            description="WoW bot administration",
+            default_permissions=discord.Permissions(administrator=True),
+        )
+
     # ══════════════════════════════════════
     #  /wow compare
     # ══════════════════════════════════════
@@ -1695,6 +1735,9 @@ class WowGroup(app_commands.Group):
         name2: str, realm2: str,
         region: str = "eu",
     ):
+        if not is_admin(interaction):
+            return await interaction.response.send_message(
+                embed=error_embed("Administrators only."), ephemeral=True)
         await interaction.response.defer()
 
         async def safe(coro, label: str = ""):
@@ -1810,15 +1853,6 @@ class WowGroup(app_commands.Group):
 
         embed.set_footer(text=f"WoW Bot · /wow compare · {region.upper()}  |  Data: Blizzard API + Raider.IO")
         await interaction.followup.send(embed=embed)
-
-
-# ─────────────────────────────────────────
-#  ADMIN: /wowsetup
-# ─────────────────────────────────────────
-class WowSetupGroup(app_commands.Group):
-    def __init__(self):
-        super().__init__(name="wowsetup", description="Configure the WoW bot channels (admins only)")
-        self.default_member_permissions = discord.Permissions(administrator=True)
 
     @app_commands.command(name="news_channel", description="Set the channel for WoW news & patch notes")
     @app_commands.describe(channel_id="Channel ID (right-click → Copy ID)")

@@ -183,15 +183,31 @@ def _paste_portrait(canvas, raw: bytes, body_top: int):
 
 
 def _draw_stats(canvas, draw, cells: list, top: int, fonts: dict):
-    """A grid of labelled cells, so page one reads like the other panels."""
-    draw.rectangle([PADDING, top, WIDTH - PADDING, top + STATS_H - 12], fill=PANEL)
+    """A grid of labelled cells, so page one reads like the other panels.
+
+    Each cell may carry its own colour; a Mythic+ rating or a placing says
+    more when it is tinted the way the game tints it.
+    """
+    bottom   = top + STATS_H - 12
     column_w = (WIDTH - PADDING * 2) // STATS_COLS
-    for index, (label, value) in enumerate(cells):
+    draw.rounded_rectangle([PADDING, top, WIDTH - PADDING, bottom], radius=10, fill=PANEL)
+
+    for column in range(1, STATS_COLS):
+        x = PADDING + column * column_w
+        draw.line([(x, top + 12), (x, bottom - 12)], fill=OUTLINE, width=1)
+
+    for index, cell in enumerate(cells):
+        label, value = cell[0], cell[1]
+        colour = cell[2] if len(cell) > 2 else TEXT
         x = PADDING + (index % STATS_COLS) * column_w + 18
         y = top + 14 + (index // STATS_COLS) * STATS_ROW
+
+        # A thin bar marks the cells that carry a colour of their own.
+        if colour != TEXT:
+            draw.rectangle([x - 9, y + 2, x - 6, y + 34], fill=colour)
         draw.text((x, y), label.upper(), font=fonts["label"], fill=TEXT_DIM)
-        draw.text((x, y + 18), _fit(draw, value, fonts["value"], column_w - 30),
-                  font=fonts["value"], fill=TEXT)
+        draw.text((x, y + 18), _fit(draw, value, fonts["value"], column_w - 34),
+                  font=fonts["value"], fill=colour)
 
 
 def render_sheet(header: dict, slots: dict, portrait: bytes | None = None,

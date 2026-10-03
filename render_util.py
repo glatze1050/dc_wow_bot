@@ -24,6 +24,42 @@ TEXT_FAINT = (118, 122, 128)
 OUTLINE    = (24, 25, 28)
 ACCENT     = (255, 164, 32)
 
+# The rating scale WoW and Raider.IO use for Mythic+.
+SCORE_TIERS = (
+    (3000, (255, 128, 0)),
+    (2500, (163, 53, 238)),
+    (2000, (0, 136, 255)),
+    (1500, (30, 200, 60)),
+    (1,    (190, 190, 190)),
+)
+
+# A placing is worth highlighting the higher up it is.
+RANK_TIERS = (
+    (100,    (229, 204, 128)),
+    (1000,   (255, 128, 0)),
+    (10000,  (163, 53, 238)),
+    (100000, (0, 136, 255)),
+)
+
+
+def score_colour(score) -> tuple:
+    if not isinstance(score, (int, float)) or score <= 0:
+        return TEXT
+    for threshold, colour in SCORE_TIERS:
+        if score >= threshold:
+            return colour
+    return TEXT
+
+
+def rank_colour(place) -> tuple:
+    if not isinstance(place, (int, float)) or place <= 0:
+        return TEXT
+    for threshold, colour in RANK_TIERS:
+        if place <= threshold:
+            return colour
+    return TEXT
+
+
 FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
