@@ -181,6 +181,17 @@ RAID_DIFFICULTIES = (
 )
 
 
+def mplus_ranks(rio: dict) -> str:
+    """World, region and realm standing for the current Mythic+ season."""
+    overall = ((rio or {}).get("mythic_plus_ranks") or {}).get("overall") or {}
+    parts = []
+    for key, label in (("world", "World"), ("region", "Region"), ("realm", "Realm")):
+        place = overall.get(key) or 0
+        if place > 0:                      # Raider.IO writes 0 for unranked
+            parts.append(f"{label} **#{place:,}**")
+    return "  ·  ".join(parts)
+
+
 def raid_status(rio: dict) -> str:
     """Furthest the character has got in any current raid, hardest mode first."""
     best_score, best_text = -1, ""
@@ -551,7 +562,8 @@ async def get_raiderio(realm: str, name: str, region: str) -> dict:
     """Raider.IO rate limits and occasionally times out, so give it a second go."""
     params = {
         "region": region, "realm": realm, "name": name,
-        "fields": "mythic_plus_scores_by_season:current,raid_progression,mythic_plus_best_runs,gear",
+        "fields": ("mythic_plus_scores_by_season:current,mythic_plus_ranks,"
+                   "raid_progression,mythic_plus_best_runs,gear"),
     }
     last_error = None
     for attempt in range(2):
@@ -1360,6 +1372,7 @@ class WowGroup(app_commands.Group):
         class_emoji = CLASS_EMOJIS.get(char_class, "⚔️")
 
         raid_standing = raid_status(rio)
+        rank_standing = mplus_ranks(rio)
         char_name  = summary.get("name", name.capitalize()) if summary else (rio or {}).get("name", name.capitalize())
         realm_name = summary.get("realm", {}).get("name", realm) if summary else (rio or {}).get("realm", realm)
 
@@ -1417,6 +1430,7 @@ class WowGroup(app_commands.Group):
                 f"📊 Level **{level}**  ·  iLvl **{ilvl_eq}** *(avg {ilvl_avg})*  ·  🏆 **{ach_pts:,}**\n"
                 f"🕒 {last_login_str}"
                 + (f"  ·  🏰 {raid_standing}" if raid_standing else "")
+                + (f"\n🏅 {rank_standing}" if rank_standing else "")
                 + "\n" + "━" * 44   # one line at full embed width
             ), inline=False)
 
