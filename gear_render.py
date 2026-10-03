@@ -40,7 +40,6 @@ TEXT        = (220, 222, 228)
 TEXT_DIM    = (142, 146, 151)
 TEXT_FAINT  = (118, 122, 128)
 EMPTY_SLOT  = (54, 57, 63)
-ENCHANT_DOT = (30, 255, 0)
 OUTLINE     = (24, 25, 28)
 
 QUALITY_COLORS = {
@@ -144,11 +143,6 @@ def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, font
     else:
         draw.text((x + ICON + 10, text_y), label, font=fonts["ilvl"], fill=colour)
         draw.text((x + ICON + 10, name_y), slot_label, font=fonts["slot"], fill=TEXT_DIM)
-
-    # Enchanted items get the same green marker the character sheet uses.
-    if slot.get("enchants"):
-        cx, cy = x + ICON - 9, y + 9
-        draw.ellipse([cx - 8, cy - 8, cx + 8, cy + 8], fill=ENCHANT_DOT, outline=OUTLINE, width=2)
 
     # Gems sit along the bottom edge of the icon.
     for index, gem_bytes in enumerate((slot.get("gems") or [])[:3]):

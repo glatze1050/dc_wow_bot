@@ -373,37 +373,6 @@ def item_stat_line(item: dict) -> str:
     return " · ".join(parts)
 
 
-ARMOR_SLOTS = ["HEAD", "SHOULDER", "CHEST", "WRIST", "HANDS", "WAIST", "LEGS", "FEET", "BACK"]
-OTHER_SLOTS = ["NECK", "FINGER_1", "FINGER_2", "TRINKET_1", "TRINKET_2", "MAIN_HAND", "OFF_HAND"]
-
-
-def item_line(item: dict) -> str:
-    """One scannable line: quality, slot, level, name, stats, markers."""
-    slot_name = (item.get("slot") or {}).get("name") or "?"
-    ilvl      = (item.get("level") or {}).get("value", 0)
-    icon      = QUALITY_ICONS.get((item.get("quality") or {}).get("type", "COMMON"), "⚪")
-    line      = f"{icon} **{slot_name}** `{ilvl}` {item.get('name', 'Unknown')}"
-    stats     = secondary_stat_line(item)
-    if stats:
-        line += f" · {stats}"
-    if item.get("enchantments"):
-        line += " ✨"
-    if item.get("sockets"):
-        line += " 💎"
-    return line
-
-
-def build_item_fields(equipment: dict) -> list:
-    """Two blocks rather than sixteen cards — a wall of cards reads as noise."""
-    items  = {i["slot"]["type"]: i for i in equipment.get("equipped_items", [])}
-    fields = []
-    for title, group in (("🛡️ Armour", ARMOR_SLOTS),
-                         ("💍 Jewellery & Weapons", OTHER_SLOTS)):
-        lines = [item_line(items[s]) for s in group if s in items]
-        if lines:
-            fields.append((title, ("\n".join(lines))[:1024]))
-    return fields
-
 def secondary_stat_line(item: dict) -> str:
     """'+79 Haste · +112 Vers' — off-spec stats are flagged and left out."""
     found = []
@@ -736,6 +705,7 @@ async def dungeon_rankings(realm: str, name: str, region: str):
         damage    = throughput.get(str(encounter.get("id"))) or {}
         stars     = entry.get("allStars") or {}
         rows.append({
+            "id":      encounter.get("id"),
             "dungeon": encounter.get("name", "?"),
             "level":   wcl_number(damage.get("best_level")),
             "runs":    wcl_number(entry.get("totalKills")) or 0,
@@ -756,6 +726,57 @@ async def dungeon_rankings(realm: str, name: str, region: str):
         "runs":       sum(row["runs"] for row in rows),
     }
     return summary, rows
+
+
+RECENT_RUNS_SHOWN = 12
+
+
+async def recent_runs(realm: str, name: str, region: str, dungeons: list) -> list:
+    """Every logged keystone run, newest first.
+
+    zoneRankings only carries a character's best per dungeon; the individual
+    runs — with their duration and key level — live under encounterRankings.
+    """
+    query = """
+    query($name:String!,$server:String!,$region:String!,$enc:Int!){
+      characterData { character(name:$name, serverSlug:$server, serverRegion:$region) {
+        encounterRankings(encounterID:$enc, metric: dps)
+      }}
+    }"""
+    base = {"name": name.capitalize(), "server": realm_slug(realm), "region": region.upper()}
+
+    async def one(dungeon: dict) -> list:
+        if not dungeon.get("id"):
+            return []
+        try:
+            data = await wcl_query(query, dict(base, enc=dungeon["id"]))
+        except Exception as exc:
+            print(f"[WARN] Runs for {dungeon.get('dungeon')} failed: {exc}")
+            return []
+        character = (data.get("characterData") or {}).get("character") or {}
+        blob = character.get("encounterRankings")
+        if isinstance(blob, str):
+            try:
+                blob = json.loads(blob)
+            except ValueError:
+                blob = {}
+        rows = []
+        for rank in (blob or {}).get("ranks") or []:
+            started = wcl_number(rank.get("startTime"))
+            rows.append({
+                "dungeon":  dungeon.get("dungeon", "?"),
+                "level":    wcl_number(rank.get("bracketData")),
+                "duration": wcl_number(rank.get("duration")),
+                "dps":      wcl_number(rank.get("amount")),
+                "percent":  wcl_number(rank.get("historicalPercent")),
+                "started":  started,
+            })
+        return rows
+
+    batches = await asyncio.gather(*(one(d) for d in dungeons))
+    runs = [row for batch in batches for row in batch]
+    runs.sort(key=lambda row: row["started"] or 0, reverse=True)
+    return runs[:RECENT_RUNS_SHOWN]
 
 
 ART_CACHE_SIZE = 60
@@ -1362,7 +1383,7 @@ class WowGroup(app_commands.Group):
                 f"🏆 **{ach_pts:,}** Achievement Points\n"
                 f"🕒 Last online: {last_login_str}"
                 + (f"\n🏰 {raid_standing}" if raid_standing else "")
-                + "\n" + "━" * 62
+                + "\n" + "━" * 44   # one line at full embed width; longer and it wraps
             ), inline=False)
 
 
@@ -1452,15 +1473,6 @@ class WowGroup(app_commands.Group):
         embeds.append(e1)
 
         # ══════════════════════════════════
-        #  EMBED 2 — ITEM DETAILS
-        # ══════════════════════════════════
-        if equipment:
-            e_items = discord.Embed(color=color)
-            e_items.set_author(name=f"{class_emoji}  {char_name}  —  Items", icon_url=thumb_url)
-            for field_name, field_value in build_item_fields(equipment)[:21]:
-                e_items.add_field(name=field_name, value=field_value, inline=False)
-            embeds.append(e_items)
-
         # ══════════════════════════════════
         #  EMBED 2 — M+ + RAIDS
         # ══════════════════════════════════
@@ -1527,6 +1539,36 @@ class WowGroup(app_commands.Group):
                         value=f"`{row['points'] or 0:.0f} pts`  ·  best `{row['best'] or 0:.0f}%`",
                         inline=True)
             embeds.append(e_dungeons)
+
+        # ══════════════════════════════════
+        #  RECENT RUNS — individual keystones, newest first
+        # ══════════════════════════════════
+            runs = []
+            try:
+                runs = await recent_runs(realm, name, region, dungeon_rows)
+            except Exception as exc:
+                print(f"[WARN] Recent runs failed: {exc}")
+            if runs:
+                e_runs = discord.Embed(color=color)
+                e_runs.set_author(name=f"{class_emoji}  {char_name}  —  Recent Runs",
+                                  icon_url=thumb_url)
+                runs_table = wcl_render.render_runs(
+                    header={"title": f"{char_name} — Recent Keystones",
+                            "subtitle": "newest first"},
+                    runs=runs,
+                )
+                if runs_table:
+                    attachments.append(discord.File(io.BytesIO(runs_table),
+                                                    filename="runs.png"))
+                    e_runs.set_image(url="attachment://runs.png")
+                else:
+                    for run in runs[:6]:
+                        e_runs.add_field(
+                            name=f"+{run['level'] or 0} {run['dungeon']}",
+                            value=f"`{(run['dps'] or 0) / 1000:.1f}K`  ·  "
+                                  f"`{run['percent'] or 0:.0f}%`",
+                            inline=True)
+                embeds.append(e_runs)
 
         # ══════════════════════════════════
 

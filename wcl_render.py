@@ -263,3 +263,77 @@ def render_dungeons(header: dict, summary: dict, rows: list) -> bytes | None:
     draw.rectangle([MARGIN, HEADER_H + DUNGEON_SUMMARY_H, DUNGEON_WIDTH - MARGIN,
                     top + len(rows) * ROW_H], outline=OUTLINE, width=2)
     return to_png(canvas)
+
+
+# Date, Dungeon, Key, Duration, DPS, Hist %
+RUN_COLUMNS = (
+    ("Date",      110, "left"),
+    ("Dungeon",   290, "left"),
+    ("Key",        80, "right"),
+    ("Duration",  110, "right"),
+    ("DPS",       140, "right"),
+    ("Hist %",     96, "right"),
+)
+RUN_WIDTH = MARGIN * 2 + sum(width for _, width, _ in RUN_COLUMNS)
+
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def run_date(milliseconds) -> str:
+    milliseconds = number(milliseconds)
+    if not milliseconds:
+        return "—"
+    import datetime as _dt
+    moment = _dt.datetime.fromtimestamp(milliseconds / 1000, tz=_dt.timezone.utc)
+    return f"{moment.day} {MONTHS[moment.month - 1]}"
+
+
+def render_runs(header: dict, runs: list) -> bytes | None:
+    """The character's most recent keystone runs, newest at the top."""
+    if not PILLOW_AVAILABLE:
+        return None
+
+    runs   = runs[:14]
+    height = HEADER_H + HEAD_ROW + len(runs) * ROW_H + MARGIN
+    canvas = Image.new("RGBA", (RUN_WIDTH, height), BG + (255,))
+    draw   = ImageDraw.Draw(canvas)
+    fonts  = {"title": font(27), "sub": font(17), "head": font(15), "cell": font(16)}
+
+    draw.text((MARGIN, 20), header.get("title", ""), font=fonts["title"], fill=TEXT)
+    subtitle = header.get("subtitle", "")
+    if subtitle:
+        draw.text((RUN_WIDTH - MARGIN - text_width(draw, subtitle, fonts["sub"]), 27),
+                  subtitle, font=fonts["sub"], fill=TEXT_DIM)
+
+    top = HEADER_H
+    draw.rectangle([MARGIN, top, RUN_WIDTH - MARGIN, top + HEAD_ROW], fill=PANEL)
+    x = MARGIN
+    for title, width, align in RUN_COLUMNS:
+        _cell(draw, title, x, width, align, top + 11, fonts["head"], TEXT_DIM)
+        x += width
+
+    top += HEAD_ROW
+    for index, run in enumerate(runs):
+        y = top + index * ROW_H
+        if index % 2:
+            draw.rectangle([MARGIN, y, RUN_WIDTH - MARGIN, y + ROW_H], fill=ROW_ALT)
+        level = number(run.get("level"))
+        dps   = number(run.get("dps"))
+        values = (
+            run_date(run.get("started")),
+            fit(draw, run.get("dungeon", "?"), fonts["cell"], RUN_COLUMNS[1][1] - 24),
+            "—" if level is None else f"+{level:.0f}",
+            kill_time(run.get("duration")),
+            "—" if dps is None else f"{dps / 1000:.1f}K",
+            "—" if number(run.get("percent")) is None else f"{run['percent']:.0f}",
+        )
+        colours = (TEXT_DIM, TEXT, KEY_LEVEL, TEXT, TEXT, parse_colour(run.get("percent")))
+        x = MARGIN
+        for (_, width, align), value, colour in zip(RUN_COLUMNS, values, colours):
+            _cell(draw, value, x, width, align, y + 8, fonts["cell"], colour)
+            x += width
+
+    draw.rectangle([MARGIN, HEADER_H, RUN_WIDTH - MARGIN, top + len(runs) * ROW_H],
+                   outline=OUTLINE, width=2)
+    return to_png(canvas)
