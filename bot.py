@@ -1403,7 +1403,7 @@ class WowGroup(app_commands.Group):
         # ══════════════════════════════════
         e2 = discord.Embed(color=color)
         e2.set_author(
-            name=f"{class_emoji}  {char_name}  —  Mythic+ & Raids",
+            name=f"{class_emoji}  {char_name}  —  Mythic+",
             icon_url=thumb_url,
         )
         if thumb_url:
@@ -1560,8 +1560,6 @@ class WowGroup(app_commands.Group):
                 prof_url = f"https://www.warcraftlogs.com/character/id/{wcl_id}"
                 e4.add_field(name="🔗 Warcraft Logs", value=f"[View profile]({prof_url})", inline=False)
 
-            if best_avg is None and not rankings:
-                e4.description = "*No raid logs found for this character.*"
         elif not wcl_ok:
             e4.description = "*Warcraft Logs API not configured (set WCL_CLIENT_ID / WCL_CLIENT_SECRET in .env).*"
         else:
