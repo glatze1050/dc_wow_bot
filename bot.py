@@ -1167,14 +1167,10 @@ class WowGroup(app_commands.Group):
                 if lines_out[half:]:
                     e1.add_field(name="​", value="\n".join(lines_out[half:]), inline=True)
 
-            if enchant_lines or gem_lines:
-                e1.add_field(
-                    name="✨ Enchants & Gems",
-                    value=f"{len(enchant_lines)} enchanted · {len(gem_lines)} gems — details on the next page",
-                    inline=False,
-                )
 
-        # ── Secondary stats ─────────────────────────────────────
+        # ── Secondary stats ────────────────────────
+        # Three inline fields fill a row, and a full row is what makes Discord
+        # draw the embed at its full width — an image alone never widens it.
         if statistics:
             haste    = statistics.get("haste",    {})
             crit     = statistics.get("crit",     {})
@@ -1182,21 +1178,21 @@ class WowGroup(app_commands.Group):
             vers     = statistics.get("versatility", 0)
             vers_dmg = statistics.get("versatility_damage_done_bonus", 0)
 
-            # Highest stat badge
-            stats_values = {
-                "Haste":        haste.get("rating", 0) if isinstance(haste, dict) else 0,
-                "Crit":         crit.get("rating", 0)  if isinstance(crit,  dict) else 0,
-                "Mastery":      mastery.get("rating", 0) if isinstance(mastery, dict) else 0,
-                "Versatility":  vers if isinstance(vers, int) else 0,
+            ratings = {
+                "Haste":       haste.get("rating", 0) if isinstance(haste, dict) else 0,
+                "Crit":        crit.get("rating", 0) if isinstance(crit, dict) else 0,
+                "Mastery":     mastery.get("rating", 0) if isinstance(mastery, dict) else 0,
+                "Versatility": vers if isinstance(vers, int) else 0,
             }
-            top_stat = max(stats_values, key=stats_values.get)
+            top_stat = max(ratings, key=ratings.get)
 
-            e1.add_field(name=f"📊 Secondary Stats  *(highest: {top_stat})*", value=(
-                f"⚡ Haste:        **{fmt_stat(haste)}**\n"
-                f"🎯 Crit:         **{fmt_stat(crit)}**\n"
-                f"🔮 Mastery:      **{fmt_stat(mastery)}**\n"
-                f"🛡️ Versatility: **{vers_dmg:.1f}% ({vers:,})**"
-            ), inline=False)
+            e1.add_field(name="⚡ Haste",       value=f"**{fmt_stat(haste)}**",   inline=True)
+            e1.add_field(name="🎯 Crit",        value=f"**{fmt_stat(crit)}**",    inline=True)
+            e1.add_field(name="🔮 Mastery",     value=f"**{fmt_stat(mastery)}**", inline=True)
+            e1.add_field(name="🛡️ Versatility", value=f"**{vers_dmg:.1f}% ({vers:,})**", inline=True)
+            e1.add_field(name="📊 Item Level",  value=f"**{ilvl_eq}** *(avg {ilvl_avg})*" if summary else "—", inline=True)
+            e1.add_field(name="🏆 Top Stat",    value=f"**{top_stat}**", inline=True)
+
 
         e1.set_footer(text="WoW Bot · Page 1/5  —  Profile, Gear & Stats")
         embeds.append(e1)
@@ -1207,7 +1203,11 @@ class WowGroup(app_commands.Group):
         if equipment:
             e_items = discord.Embed(color=color)
             e_items.set_author(name=f"{class_emoji}  {char_name}  —  Items", icon_url=thumb_url)
-            for field_name, field_value in build_item_fields(equipment)[:24]:
+            # A full row of inline fields is what widens the embed.
+            e_items.add_field(name="📊 Equipped",  value=f"**Ø {avg_ilvl}** iLvl", inline=True)
+            e_items.add_field(name="✨ Enchants",  value=f"**{len(enchant_lines)}** items", inline=True)
+            e_items.add_field(name="💎 Gems",      value=f"**{len(gem_lines)}** sockets", inline=True)
+            for field_name, field_value in build_item_fields(equipment)[:21]:
                 e_items.add_field(name=field_name, value=field_value, inline=False)
             e_items.set_footer(text="WoW Bot · Page 2/5  —  Item Details")
             embeds.append(e_items)
