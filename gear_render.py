@@ -44,6 +44,7 @@ BG          = (43, 45, 49)
 TEXT        = (220, 222, 228)
 TEXT_DIM    = (142, 146, 151)
 PANEL       = (54, 57, 63)
+ENCHANT_GREEN = (64, 222, 64)   # the green the game prints an enchant in
 TEXT_FAINT  = (118, 122, 128)
 EMPTY_SLOT  = (54, 57, 63)
 OUTLINE     = (24, 25, 28)
@@ -118,7 +119,8 @@ def _open_icon(raw: bytes, size: int):
     return image
 
 
-def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, fonts: dict):
+def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool,
+               fonts: dict, room: int = 0):
     """One item: icon, quality border, item level, slot name, enchant, gems."""
     colour = QUALITY_COLORS.get(slot.get("quality") or "COMMON", QUALITY_COLORS["COMMON"])
 
@@ -138,17 +140,30 @@ def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, font
     ilvl  = slot.get("ilvl")
     label = str(ilvl) if ilvl else "—"
     slot_label = slot.get("label", "")
-    text_y = y + 14
-    name_y = text_y + 26
+    text_y = y + 6
+    name_y = text_y + 24
+
+    # The enchant reads in the green the game uses for it.
+    enchants  = slot.get("enchants") or []
+    enchant_y = name_y + 20
+    if not room:
+        room = (x - 16 - PORTRAIT_X[1]) if align_right else (PORTRAIT_X[0] - x - ICON - 26)
+    enchant   = _fit(draw, enchants[0], fonts["enchant"], max(room, 60)) if enchants else ""
 
     if align_right:
         draw.text((x - 10 - _text_width(draw, label, fonts["ilvl"]), text_y),
                   label, font=fonts["ilvl"], fill=colour)
         draw.text((x - 10 - _text_width(draw, slot_label, fonts["slot"]), name_y),
                   slot_label, font=fonts["slot"], fill=TEXT_DIM)
+        if enchant:
+            draw.text((x - 10 - _text_width(draw, enchant, fonts["enchant"]), enchant_y),
+                      enchant, font=fonts["enchant"], fill=ENCHANT_GREEN)
     else:
         draw.text((x + ICON + 10, text_y), label, font=fonts["ilvl"], fill=colour)
         draw.text((x + ICON + 10, name_y), slot_label, font=fonts["slot"], fill=TEXT_DIM)
+        if enchant:
+            draw.text((x + ICON + 10, enchant_y), enchant,
+                      font=fonts["enchant"], fill=ENCHANT_GREEN)
 
     # Gems sit along the bottom edge of the icon.
     for index, gem_bytes in enumerate((slot.get("gems") or [])[:3]):
@@ -229,13 +244,24 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None,
     canvas = Image.new("RGBA", (WIDTH, height), BG + (255,))
     draw   = ImageDraw.Draw(canvas)
     fonts  = {"title": _font(28), "sub": _font(19), "ilvl": _font(20), "slot": _font(15),
-              "label": _font(13), "value": _font(19)}
+              "label": _font(13), "value": _font(19), "enchant": _font(12)}
 
-    draw.text((PADDING, 18), header.get("title", ""), font=fonts["title"], fill=TEXT)
-    subtitle = header.get("subtitle", "")
-    if subtitle:
-        width = _text_width(draw, subtitle, fonts["sub"])
-        draw.text((WIDTH - PADDING - width, 27), subtitle, font=fonts["sub"], fill=TEXT_DIM)
+    draw.text((PADDING, 18), header.get("title", ""), font=fonts["title"],
+              fill=header.get("title_colour") or TEXT)
+
+    # Right-aligned segments, each able to carry its own colour.
+    segments = [seg for seg in header.get("segments", ()) if seg and seg[0]]
+    if segments:
+        gap   = "  ·  "
+        total = sum(_text_width(draw, text, fonts["sub"]) for text, _ in segments)
+        total += _text_width(draw, gap, fonts["sub"]) * (len(segments) - 1)
+        x = WIDTH - PADDING - total
+        for index, (text, colour) in enumerate(segments):
+            if index:
+                draw.text((x, 27), gap, font=fonts["sub"], fill=TEXT_DIM)
+                x += _text_width(draw, gap, fonts["sub"])
+            draw.text((x, 27), text, font=fonts["sub"], fill=colour or TEXT_DIM)
+            x += _text_width(draw, text, fonts["sub"])
 
     # The figures sit above the paper doll, which then starts lower down.
     if cells:
@@ -261,7 +287,7 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None,
     start_x   = WIDTH // 2 - (len(BOTTOM_SLOTS) * step - BOTTOM_GAP) // 2
     for index, slot_type in enumerate(BOTTOM_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   start_x + index * step, weapons_y, False, fonts)
+                   start_x + index * step, weapons_y, False, fonts, BOTTOM_GAP - 14)
 
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, format="PNG", optimize=True)

@@ -163,6 +163,17 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ─────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────
+def working_embed(name: str, realm: str) -> discord.Embed:
+    """Shown while the lookup runs — Discord's own "is thinking" notice is
+    localised to each viewer's client and cannot be worded by the bot."""
+    embed = discord.Embed(
+        description=f"🔍  Reading the armoury for **{name.capitalize()}** "
+                    f"of **{realm.replace(chr(45), chr(32)).title()}**…",
+        color=0x00AEFF,
+    )
+    return embed
+
+
 def error_embed(msg: str) -> discord.Embed:
     embed = discord.Embed(
         title="❌  Error",
@@ -516,6 +527,16 @@ async def realm_autocomplete(interaction: discord.Interaction, current: str) -> 
         realms = [r for r in realms if needle in r[0].lower()]
         realms.sort(key=lambda r: (not r[0].lower().startswith(needle), r[0]))
     return [app_commands.Choice(name=name, value=slug) for name, slug in realms[:25]]
+
+
+def dominant_quality(equipment: dict) -> str:
+    """The quality most of the set is; a fair colour for the average level."""
+    counts = {}
+    for item in equipment.get("equipped_items", []):
+        quality = (item.get("quality") or {}).get("type")
+        if quality:
+            counts[quality] = counts.get(quality, 0) + 1
+    return max(counts, key=counts.get) if counts else "COMMON"
 
 
 async def build_gear_slots(equipment: dict, region: str):
@@ -1328,13 +1349,13 @@ class WowGroup(app_commands.Group):
     ])
     @app_commands.autocomplete(name=character_autocomplete, realm=realm_autocomplete)
     async def check(self, interaction: discord.Interaction, name: str, realm: str = "", region: str = "eu"):
-        await interaction.response.defer()
+        await interaction.response.send_message(embed=working_embed(name, realm or "…"))
 
         # A name picked from the history already knows where it lives.
         if not realm:
             remembered = recall_character(interaction.guild_id, name)
             if not remembered:
-                return await interaction.followup.send(embed=error_embed(
+                return await interaction.edit_original_response(embed=error_embed(
                     f"No realm given for **{name}**, and this server has not looked it up before.\n"
                     "Pick a realm from the list."
                 ))
@@ -1372,7 +1393,7 @@ class WowGroup(app_commands.Group):
             )
 
         if not summary and not rio:
-            return await interaction.followup.send(embed=error_embed(
+            return await interaction.edit_original_response(embed=error_embed(
                 f"**{name}** was not found on **{realm}-{region.upper()}**.\n"
                 "Check the name and realm — the character must be on a Retail server."
             ))
@@ -1390,7 +1411,8 @@ class WowGroup(app_commands.Group):
             if seasons:
                 mp_score = seasons[0].get("scores", {}).get("all", 0.0)
 
-        color       = CLASS_COLORS.get(char_class, mp_colour(mp_score))
+        color        = CLASS_COLORS.get(char_class, mp_colour(mp_score))
+        class_colour = render_util.rgb(CLASS_COLORS.get(char_class))
         class_emoji = CLASS_EMOJIS.get(char_class, "⚔️")
 
         raid_standing = raid_status(rio)
@@ -1509,9 +1531,14 @@ class WowGroup(app_commands.Group):
 
             sheet = gear_render.render_sheet(
                 header={
-                    "title":    f"{char_name} — {realm_name} ({region.upper()})",
-                    "subtitle": (f"{char_class}  ·  Ø {avg_ilvl} iLvl"
-                                 + (f"  ·  M+ {mp_score:.0f}" if mp_score else "")),
+                    "title":        f"{char_name} — {realm_name} ({region.upper()})",
+                    "title_colour": class_colour,
+                    "segments":     [
+                        (char_class, class_colour),
+                        (f"Ø {avg_ilvl} iLvl",
+                         gear_render.QUALITY_COLORS.get(dominant_quality(equipment),
+                                                        render_util.TEXT)),
+                    ],
                 },
                 slots=slots,
                 portrait=portrait,
@@ -1689,7 +1716,11 @@ class WowGroup(app_commands.Group):
 
         embeds.append(e4)
 
-        await interaction.followup.send(embeds=embeds, files=attachments or discord.utils.MISSING)
+        # embeds replaces the placeholder; passing embed as well is rejected.
+        await interaction.edit_original_response(
+            embeds=embeds,
+            attachments=attachments or discord.utils.MISSING,
+        )
 
         # Only a lookup that actually resolved is worth suggesting next time.
         remember_character(interaction.guild_id, char_name, realm, region, realm_name)

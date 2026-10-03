@@ -42,6 +42,13 @@ RANK_TIERS = (
 )
 
 
+def rgb(value) -> tuple:
+    """0xA330C9 → (163, 48, 201); anything else falls back to plain text."""
+    if not isinstance(value, int):
+        return TEXT
+    return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
+
+
 def score_colour(score) -> tuple:
     if not isinstance(score, (int, float)) or score <= 0:
         return TEXT
