@@ -1508,6 +1508,17 @@ class WowGroup(app_commands.Group):
             e1.add_field(name="🗝️ M+ Rating",  value=f"**{mp_score:.0f}**", inline=True)
 
 
+        # Both profiles belong where the character is introduced.
+        profile_links = []
+        if rio and rio.get("profile_url"):
+            profile_links.append(f"[Raider.IO]({rio['profile_url']})")
+        if wcl and wcl.get("id"):
+            profile_links.append(
+                f"[Warcraft Logs](https://www.warcraftlogs.com/character/id/{wcl['id']})")
+        if profile_links:
+            e1.add_field(name="🔗 Profiles", value="  ·  ".join(profile_links),
+                         inline=False)
+
         embeds.append(e1)
 
         # ══════════════════════════════════
@@ -1516,10 +1527,6 @@ class WowGroup(app_commands.Group):
         if equipment:
             e_items = discord.Embed(color=color)
             e_items.set_author(name=f"{class_emoji}  {char_name}  —  Items", icon_url=thumb_url)
-            # A full row of inline fields is what widens the embed.
-            e_items.add_field(name="📊 Equipped",  value=f"**Ø {avg_ilvl}** iLvl", inline=True)
-            e_items.add_field(name="✨ Enchants",  value=f"**{len(enchant_lines)}** items", inline=True)
-            e_items.add_field(name="💎 Gems",      value=f"**{len(gem_lines)}** sockets", inline=True)
             for field_name, field_value in build_item_fields(equipment)[:21]:
                 e_items.add_field(name=field_name, value=field_value, inline=False)
             embeds.append(e_items)
@@ -1556,9 +1563,6 @@ class WowGroup(app_commands.Group):
                     e2.add_field(name=f"🔑 +{run['level']} {run['dungeon']}",
                                  value=f"`{run['score']:.0f} pts`", inline=True)
 
-            profile_url = rio.get("profile_url")
-            if profile_url:
-                e2.add_field(name="🔗 RaiderIO", value=f"[View profile]({profile_url})", inline=False)
         else:
             e2.description = "*(Raider.IO data unavailable — the character needs a recent login.)*"
 
@@ -1636,11 +1640,6 @@ class WowGroup(app_commands.Group):
                 e4.description = "*No raid logs found for this character.*"
 
 
-            # Link to the Warcraft Logs profile
-            wcl_id = wcl.get("id")
-            if wcl_id:
-                prof_url = f"https://www.warcraftlogs.com/character/id/{wcl_id}"
-                e4.add_field(name="🔗 Warcraft Logs", value=f"[View profile]({prof_url})", inline=False)
 
         elif not wcl_ok:
             e4.description = "*Warcraft Logs API not configured (set WCL_CLIENT_ID / WCL_CLIENT_SECRET in .env).*"
