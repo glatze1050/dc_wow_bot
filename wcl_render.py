@@ -32,7 +32,9 @@ COLUMNS = (
 )
 WIDTH = MARGIN * 2 + sum(width for _, width, _ in COLUMNS)
 
-ROW_ALT = (48, 51, 56)
+ROW_ALT      = (48, 51, 56)
+KEY_LEVEL    = (255, 212, 90)
+SCORE_COLOUR = (226, 104, 168)
 
 # Warcraft Logs colours a parse by its percentile bracket.
 PARSE_COLOURS = (
@@ -171,28 +173,33 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
     return to_png(canvas)
 
 
-# Dungeon, Damage, Healing, Speed, Best DPS, Runs
+# Dungeon, Level, Runs, Points, Rank, Best DPS, Best %, Median %
 DUNGEON_COLUMNS = (
-    ("Dungeon",    330, "left"),
-    ("Damage",     110, "right"),
-    ("Healing",    110, "right"),
-    ("Speed",      110, "right"),
-    ("Best DPS",   160, "right"),
-    ("Runs",        90, "right"),
+    ("Dungeon",   290, "left"),
+    ("Level",      80, "right"),
+    ("Runs",       80, "right"),
+    ("Points",    100, "right"),
+    ("Rank",      100, "right"),
+    ("Best DPS",  130, "right"),
+    ("Best %",     90, "right"),
+    ("Median %",   96, "right"),
 )
 DUNGEON_WIDTH = MARGIN * 2 + sum(width for _, width, _ in DUNGEON_COLUMNS)
+DUNGEON_SUMMARY_H = 104
 
 
-def render_dungeons(header: dict, rows: list) -> bytes | None:
-    """Mythic+ percentiles per dungeon, the three metrics side by side."""
+def render_dungeons(header: dict, summary: dict, rows: list) -> bytes | None:
+    """Mythic+ score and damage per dungeon, as the character page lists them."""
     if not PILLOW_AVAILABLE:
         return None
 
     rows   = rows[:14]
-    height = HEADER_H + HEAD_ROW + len(rows) * ROW_H + MARGIN
+    height = HEADER_H + DUNGEON_SUMMARY_H + HEAD_ROW + len(rows) * ROW_H + MARGIN
     canvas = Image.new("RGBA", (DUNGEON_WIDTH, height), BG + (255,))
     draw   = ImageDraw.Draw(canvas)
-    fonts  = {"title": font(27), "sub": font(17), "head": font(15), "cell": font(16)}
+    fonts  = {"title": font(27), "sub": font(17), "caption": font(14),
+              "huge": font(44), "stat": font(19), "statlabel": font(14),
+              "head": font(15), "cell": font(16)}
 
     draw.text((MARGIN, 20), header.get("title", ""), font=fonts["title"], fill=TEXT)
     subtitle = header.get("subtitle", "")
@@ -201,6 +208,28 @@ def render_dungeons(header: dict, rows: list) -> bytes | None:
                   subtitle, font=fonts["sub"], fill=TEXT_DIM)
 
     top = HEADER_H
+    draw.rectangle([MARGIN, top, DUNGEON_WIDTH - MARGIN, top + DUNGEON_SUMMARY_H - 14],
+                   fill=PANEL)
+    score = number(summary.get("score"))
+    draw.text((MARGIN + 22, top + 12), "MYTHIC+ SCORE", font=fonts["caption"], fill=TEXT_DIM)
+    draw.text((MARGIN + 22, top + 30), "—" if score is None else f"{score:.0f}",
+              font=fonts["huge"], fill=(226, 104, 168))
+
+    counters = (
+        ("Spec Rank", f"{number(summary.get('spec_rank')) or 0:,}"),
+        ("Best DPS % Avg",
+         "—" if number(summary.get("best_avg")) is None else f"{summary['best_avg']:.1f}"),
+        ("Median DPS % Avg",
+         "—" if number(summary.get("median_avg")) is None else f"{summary['median_avg']:.1f}"),
+        ("Runs", str(number(summary.get("runs")) or 0)),
+    )
+    slot = (DUNGEON_WIDTH - MARGIN * 2 - 250) // len(counters)
+    for index, (label, value) in enumerate(counters):
+        x = MARGIN + 250 + index * slot
+        draw.text((x, top + 26), label, font=fonts["statlabel"], fill=TEXT_DIM)
+        draw.text((x, top + 46), value, font=fonts["stat"], fill=TEXT)
+
+    top += DUNGEON_SUMMARY_H
     draw.rectangle([MARGIN, top, DUNGEON_WIDTH - MARGIN, top + HEAD_ROW], fill=PANEL)
     x = MARGIN
     for title, width, align in DUNGEON_COLUMNS:
@@ -212,21 +241,25 @@ def render_dungeons(header: dict, rows: list) -> bytes | None:
         y = top + index * ROW_H
         if index % 2:
             draw.rectangle([MARGIN, y, DUNGEON_WIDTH - MARGIN, y + ROW_H], fill=ROW_ALT)
+        level = number(row.get("level"))
+        dps   = number(row.get("dps"))
         values = (
             fit(draw, row.get("dungeon", "?"), fonts["cell"], DUNGEON_COLUMNS[0][1] - 24),
-            "—" if number(row.get("damage")) is None else f"{number(row['damage']):.0f}",
-            "—" if number(row.get("healing")) is None else f"{number(row['healing']):.0f}",
-            "—" if number(row.get("speed")) is None else f"{number(row['speed']):.0f}",
-            "—" if not number(row.get("dps")) else f"{number(row['dps']):,.0f}",
+            "—" if level is None else f"+{level:.0f}",
             str(number(row.get("runs")) or 0),
+            "—" if number(row.get("points")) is None else f"{row['points']:.0f}",
+            "—" if number(row.get("rank")) is None else f"{row['rank']:,}",
+            "—" if dps is None else f"{dps / 1000:.1f}K",
+            "—" if number(row.get("best")) is None else f"{row['best']:.0f}",
+            "—" if number(row.get("median")) is None else f"{row['median']:.0f}",
         )
-        colours = (TEXT, parse_colour(row.get("damage")), parse_colour(row.get("healing")),
-                   parse_colour(row.get("speed")), TEXT, TEXT_DIM)
+        colours = (TEXT, KEY_LEVEL, TEXT_DIM, SCORE_COLOUR, TEXT_DIM, TEXT,
+                   parse_colour(row.get("best")), parse_colour(row.get("median")))
         x = MARGIN
         for (_, width, align), value, colour in zip(DUNGEON_COLUMNS, values, colours):
             _cell(draw, value, x, width, align, y + 8, fonts["cell"], colour)
             x += width
 
-    draw.rectangle([MARGIN, HEADER_H, DUNGEON_WIDTH - MARGIN, top + len(rows) * ROW_H],
-                   outline=OUTLINE, width=2)
+    draw.rectangle([MARGIN, HEADER_H + DUNGEON_SUMMARY_H, DUNGEON_WIDTH - MARGIN,
+                    top + len(rows) * ROW_H], outline=OUTLINE, width=2)
     return to_png(canvas)

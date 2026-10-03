@@ -679,8 +679,8 @@ async def current_mplus_zone() -> int:
     return newest["id"]
 
 
-async def dungeon_rankings(realm: str, name: str, region: str) -> list:
-    """One row per dungeon with its Damage, Healing and Speed percentile."""
+async def dungeon_rankings(realm: str, name: str, region: str):
+    """(summary, rows) for the Mythic+ page: one request carries score and damage."""
     zone  = await current_mplus_zone()
     query = """
     query($name:String!,$server:String!,$region:String!,$zone:Int!,$metric:CharacterPageRankingMetricType!){
@@ -688,39 +688,48 @@ async def dungeon_rankings(realm: str, name: str, region: str) -> list:
         zoneRankings(zoneID:$zone, metric:$metric)
       }}
     }"""
-    base = {"name": name.capitalize(), "server": realm_slug(realm),
-            "region": region.upper(), "zone": zone}
+    data = await wcl_query(query, {
+        "name": name.capitalize(), "server": realm_slug(realm),
+        "region": region.upper(), "zone": zone, "metric": "points_and_damage",
+    })
+    character = (data.get("characterData") or {}).get("character") or {}
+    blob = character.get("zoneRankings")
+    if isinstance(blob, str):
+        try:
+            blob = json.loads(blob)
+        except ValueError:
+            blob = {}
+    blob = blob or {}
 
-    async def one(metric):
-        data = await wcl_query(query, dict(base, metric=metric))
-        char = (data.get("characterData") or {}).get("character") or {}
-        blob = char.get("zoneRankings")
-        if isinstance(blob, str):
-            try:
-                blob = json.loads(blob)
-            except ValueError:
-                blob = {}
-        return (blob or {}).get("rankings") or []
-
-    damage, healing, speed = await asyncio.gather(*(one(m) for m in WCL_METRICS))
-
-    def by_name(entries):
-        return {(e.get("encounter") or {}).get("name", "?"): e for e in entries}
-
-    healing_by, speed_by = by_name(healing), by_name(speed)
+    # The damage columns live beside the score ones, keyed by encounter id.
+    throughput = blob.get("throughputRankings") or {}
     rows = []
-    for entry in damage:
-        dungeon = (entry.get("encounter") or {}).get("name", "?")
+    for entry in blob.get("rankings") or []:
+        encounter = entry.get("encounter") or {}
+        damage    = throughput.get(str(encounter.get("id"))) or {}
+        stars     = entry.get("allStars") or {}
         rows.append({
-            "dungeon": dungeon,
-            "damage":  wcl_number(entry.get("rankPercent")),
-            "healing": wcl_number((healing_by.get(dungeon) or {}).get("rankPercent")),
-            "speed":   wcl_number((speed_by.get(dungeon) or {}).get("rankPercent")),
-            "dps":     wcl_number(entry.get("bestAmount")) or 0,
+            "dungeon": encounter.get("name", "?"),
+            "level":   wcl_number(damage.get("best_level")),
             "runs":    wcl_number(entry.get("totalKills")) or 0,
+            "points":  wcl_number(stars.get("points")),
+            "rank":    wcl_number(stars.get("rank")),
+            "dps":     wcl_number(damage.get("best_per_second_amount")),
+            "best":    wcl_number(damage.get("best_historical_percentile")),
+            "median":  wcl_number(damage.get("median_historical_percentile")),
         })
-    rows.sort(key=lambda r: r["damage"] or 0, reverse=True)
-    return rows
+    rows.sort(key=lambda row: row["dungeon"])
+
+    overall = (blob.get("allStars") or [{}])[0]
+    summary = {
+        "score":      wcl_number(overall.get("points")),
+        "spec_rank":  wcl_number(overall.get("rank")),
+        "best_avg":   wcl_number(blob.get("bestPerformanceAverage")),
+        "median_avg": wcl_number(blob.get("medianPerformanceAverage")),
+        "runs":       sum(row["runs"] for row in rows),
+    }
+    return summary, rows
+
 
 ART_CACHE_SIZE = 60
 _art_cache: dict = {}
@@ -1529,10 +1538,10 @@ class WowGroup(app_commands.Group):
         # ══════════════════════════════════
         #  DUNGEON LOGS — Mythic+ on Warcraft Logs
         # ══════════════════════════════════
-        dungeon_rows = []
+        dungeon_rows, dungeon_summary = [], {}
         if wcl_ok:
             try:
-                dungeon_rows = await dungeon_rankings(realm, name, region)
+                dungeon_summary, dungeon_rows = await dungeon_rankings(realm, name, region)
             except Exception as exc:
                 print(f"[WARN] Dungeon rankings failed: {exc}")
         if dungeon_rows:
@@ -1541,7 +1550,8 @@ class WowGroup(app_commands.Group):
                                   icon_url=thumb_url)
             dungeon_table = wcl_render.render_dungeons(
                 header={"title": f"{char_name} — Mythic+ Dungeons",
-                        "subtitle": "Damage  ·  Healing  ·  Speed"},
+                        "subtitle": "Points & Damage by level"},
+                summary=dungeon_summary,
                 rows=dungeon_rows,
             )
             if dungeon_table:
@@ -1550,9 +1560,8 @@ class WowGroup(app_commands.Group):
             else:
                 for row in dungeon_rows[:6]:
                     e_dungeons.add_field(
-                        name=row["dungeon"],
-                        value=f"Dmg `{row['damage'] or 0:.0f}`  Heal `{row['healing'] or 0:.0f}`  "
-                              f"Speed `{row['speed'] or 0:.0f}`",
+                        name=f"+{row['level'] or 0} {row['dungeon']}",
+                        value=f"`{row['points'] or 0:.0f} pts`  ·  best `{row['best'] or 0:.0f}%`",
                         inline=True)
             embeds.append(e_dungeons)
 

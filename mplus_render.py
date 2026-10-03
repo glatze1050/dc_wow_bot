@@ -59,27 +59,20 @@ def _draw_tile(canvas, draw, run: dict, x: int, y: int, fonts: dict):
     if not art:
         draw.rectangle([x, y, x + TILE_W, y + ART_H], fill=PANEL)
 
-    # Short name sits top-left, the way the dungeon window labels its tiles.
-    short = (run.get("short_name") or "").upper()
-    if short:
-        draw.text((x + 10, y + 8), short, font=fonts["short"], fill=TEXT)
-
     level = run.get("level")
     if level:
         key = f"+{level}"
-        draw.text((centred(draw, key, fonts["key"], x, x + TILE_W), y + ART_H - 64),
+        draw.text((centred(draw, key, fonts["key"], x, x + TILE_W), y + ART_H - 58),
                   key, font=fonts["key"], fill=KEY_COLOUR)
 
-    # Drawn rather than typed: not every font on a server carries a star.
+    # Upgrade chevrons live in the top corner, clear of the key level, and are
+    # drawn rather than typed: not every font on a server carries a star.
     upgrades = min(run.get("upgrades", 0) or 0, 3)
-    if upgrades:
-        dot, gap = 9, 6
-        span  = upgrades * dot + (upgrades - 1) * gap
-        start = x + (TILE_W - span) // 2
-        for index in range(upgrades):
-            left = start + index * (dot + gap)
-            draw.ellipse([left, y + ART_H - 22, left + dot, y + ART_H - 22 + dot],
-                         fill=KEY_COLOUR, outline=OUTLINE)
+    dot, gap = 9, 5
+    for index in range(upgrades):
+        left = x + TILE_W - 10 - (index + 1) * dot - index * gap
+        draw.ellipse([left, y + 10, left + dot, y + 10 + dot],
+                     fill=KEY_COLOUR, outline=OUTLINE)
 
     draw.rectangle([x, y, x + TILE_W, y + ART_H], outline=OUTLINE, width=2)
 
