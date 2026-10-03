@@ -22,7 +22,11 @@ except ImportError:  # the bot stays usable without the optional dependency
 # ─────────────────────────────────────────
 #  LAYOUT
 # ─────────────────────────────────────────
-WIDTH    = 1140   # with the 856 px height this is 4:3, the widest Discord shows
+WIDTH    = 1352   # together with the stat strip this stays 4:3, the widest
+                  # aspect Discord will draw before it starts losing height
+STATS_H  = 158
+STATS_COLS = 4
+STATS_ROW  = 46
 PADDING  = 22
 ICON     = 72
 ROW_STEP = 84
@@ -32,12 +36,14 @@ BORDER   = 3
 
 LEFT_X       = PADDING
 RIGHT_X      = WIDTH - PADDING - ICON
-PORTRAIT_BOX = (260, HEADER_H + 10, 880, HEADER_H + 10 + 8 * ROW_STEP - 10)
+PORTRAIT_X   = (300, 1050)        # the lane between the two slot columns
+PORTRAIT_PAD = 10
 
 # Matches the Discord dark embed background so the image reads as one block.
 BG          = (43, 45, 49)
 TEXT        = (220, 222, 228)
 TEXT_DIM    = (142, 146, 151)
+PANEL       = (54, 57, 63)
 TEXT_FAINT  = (118, 122, 128)
 EMPTY_SLOT  = (54, 57, 63)
 OUTLINE     = (24, 25, 28)
@@ -155,9 +161,11 @@ def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool, font
             continue
 
 
-def _paste_portrait(canvas, raw: bytes):
+def _paste_portrait(canvas, raw: bytes, body_top: int):
     """Fit the full-body render into the middle column, keeping its ratio."""
-    left, top, right, bottom = PORTRAIT_BOX
+    left, right = PORTRAIT_X
+    top    = body_top + PORTRAIT_PAD
+    bottom = body_top + 8 * ROW_STEP - PORTRAIT_PAD
     box_w, box_h = right - left, bottom - top
     portrait = Image.open(io.BytesIO(raw)).convert("RGBA")
     # Blizzard pads the render with a lot of transparency; trim it so the
@@ -174,7 +182,20 @@ def _paste_portrait(canvas, raw: bytes):
     )
 
 
-def render_sheet(header: dict, slots: dict, portrait: bytes | None = None) -> bytes | None:
+def _draw_stats(canvas, draw, cells: list, top: int, fonts: dict):
+    """A grid of labelled cells, so page one reads like the other panels."""
+    draw.rectangle([PADDING, top, WIDTH - PADDING, top + STATS_H - 12], fill=PANEL)
+    column_w = (WIDTH - PADDING * 2) // STATS_COLS
+    for index, (label, value) in enumerate(cells):
+        x = PADDING + (index % STATS_COLS) * column_w + 18
+        y = top + 14 + (index // STATS_COLS) * STATS_ROW
+        draw.text((x, y), label.upper(), font=fonts["label"], fill=TEXT_DIM)
+        draw.text((x, y + 18), _fit(draw, value, fonts["value"], column_w - 30),
+                  font=fonts["value"], fill=TEXT)
+
+
+def render_sheet(header: dict, slots: dict, portrait: bytes | None = None,
+                 stats: list = ()) -> bytes | None:
     """Draw the sheet and return PNG bytes, or None if Pillow is unavailable.
 
     `header` carries the title line; `slots` maps a slot type such as "HEAD"
@@ -183,19 +204,16 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None) -> by
     if not PILLOW_AVAILABLE:
         return None
 
-    rows   = max(len(LEFT_SLOTS), len(RIGHT_SLOTS))
-    body_h = rows * ROW_STEP
-    height = HEADER_H + 10 + body_h + ROW_STEP + PADDING
+    rows    = max(len(LEFT_SLOTS), len(RIGHT_SLOTS))
+    body_h  = rows * ROW_STEP
+    cells   = list(stats)
+    stats_h = STATS_H if cells else 0
+    height  = HEADER_H + 10 + body_h + ROW_STEP + stats_h + PADDING
 
     canvas = Image.new("RGBA", (WIDTH, height), BG + (255,))
     draw   = ImageDraw.Draw(canvas)
-    fonts  = {"title": _font(28), "sub": _font(19), "ilvl": _font(20), "slot": _font(15)}
-
-    if portrait:
-        try:
-            _paste_portrait(canvas, portrait)
-        except Exception:
-            pass
+    fonts  = {"title": _font(28), "sub": _font(19), "ilvl": _font(20), "slot": _font(15),
+              "label": _font(13), "value": _font(19)}
 
     draw.text((PADDING, 18), header.get("title", ""), font=fonts["title"], fill=TEXT)
     subtitle = header.get("subtitle", "")
@@ -203,15 +221,26 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None) -> by
         width = _text_width(draw, subtitle, fonts["sub"])
         draw.text((WIDTH - PADDING - width, 27), subtitle, font=fonts["sub"], fill=TEXT_DIM)
 
+    # The figures sit above the paper doll, which then starts lower down.
+    if cells:
+        _draw_stats(canvas, draw, cells, HEADER_H + 4, fonts)
+    body_top = HEADER_H + 10 + stats_h
+
+    if portrait:
+        try:
+            _paste_portrait(canvas, portrait, body_top)
+        except Exception:
+            pass
+
     for index, slot_type in enumerate(LEFT_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   LEFT_X, HEADER_H + 10 + index * ROW_STEP, False, fonts)
+                   LEFT_X, body_top + index * ROW_STEP, False, fonts)
 
     for index, slot_type in enumerate(RIGHT_SLOTS):
         _draw_slot(canvas, draw, slots.get(slot_type) or {"label": slot_type.title()},
-                   RIGHT_X, HEADER_H + 10 + index * ROW_STEP, True, fonts)
+                   RIGHT_X, body_top + index * ROW_STEP, True, fonts)
 
-    weapons_y = HEADER_H + 10 + body_h
+    weapons_y = body_top + body_h
     step      = ICON + BOTTOM_GAP
     start_x   = WIDTH // 2 - (len(BOTTOM_SLOTS) * step - BOTTOM_GAP) // 2
     for index, slot_type in enumerate(BOTTOM_SLOTS):

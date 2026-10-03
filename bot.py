@@ -181,15 +181,17 @@ RAID_DIFFICULTIES = (
 )
 
 
-def mplus_ranks(rio: dict) -> str:
-    """World, region and realm standing for the current Mythic+ season."""
+def mplus_ranks(rio: dict) -> dict:
+    """World, region and realm placing; Raider.IO writes 0 for unranked."""
     overall = ((rio or {}).get("mythic_plus_ranks") or {}).get("overall") or {}
-    parts = []
-    for key, label in (("world", "World"), ("region", "Region"), ("realm", "Realm")):
-        place = overall.get(key) or 0
-        if place > 0:                      # Raider.IO writes 0 for unranked
-            parts.append(f"{label} **#{place:,}**")
-    return "  ·  ".join(parts)
+    return {key: (overall.get(key) or 0) or None for key in ("world", "region", "realm")}
+
+
+def stat_percent(value) -> str:
+    """The percentage alone: the rating beside it is often reported as zero."""
+    if isinstance(value, dict):
+        return f"{value.get('value', value.get('rating_bonus_value', 0)):.1f}%"
+    return f"{value:.1f}%" if isinstance(value, (int, float)) else str(value)
 
 
 def raid_status(rio: dict) -> str:
@@ -1398,7 +1400,8 @@ class WowGroup(app_commands.Group):
                 "**[▸ Warcraft Logs]"
                 f"(https://www.warcraftlogs.com/character/id/{wcl['id']})**")
         if profile_links:
-            e1.description = "  ".join(profile_links)
+            e1.description = ("  ".join(profile_links)
+                              if profile_links else None)
         e1.set_author(
             name=f"{class_emoji}  {char_name}  —  {realm_name} ({region.upper()})",
             icon_url=thumb_url,
@@ -1425,22 +1428,47 @@ class WowGroup(app_commands.Group):
                 dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
                 last_login_str = f"<t:{int(dt.timestamp())}:R>"
 
-            e1.add_field(name="📋 Profile", value=(
-                f"{faction_ico} **{race} {char_class}** — {spec}  ·  {guild_str}\n"
-                f"📊 Level **{level}**  ·  iLvl **{ilvl_eq}** *(avg {ilvl_avg})*  ·  🏆 **{ach_pts:,}**\n"
-                f"🕒 {last_login_str}"
-                + (f"  ·  🏰 {raid_standing}" if raid_standing else "")
-                + (f"\n🏅 {rank_standing}" if rank_standing else "")
-                + "\n" + "━" * 44   # one line at full embed width
-            ), inline=False)
-
-
         elif rio:
             spec = rio.get("active_spec_name", "?")
             e1.add_field(name="📋 Profile", value=(
                 f"{class_emoji} **{char_class}** — {spec}\n"
                 f"*(Blizzard API not configured)*"
             ), inline=False)
+
+        sheet_stats = []
+        # ── Figures for the sheet ─────────────────────
+        if statistics:
+            haste    = statistics.get("haste",    {})
+            crit     = statistics.get("crit",     {})
+            mastery  = statistics.get("mastery",  {})
+            vers     = statistics.get("versatility", 0)
+            vers_dmg = statistics.get("versatility_damage_done_bonus", 0)
+
+            ratings = {
+                "Haste":       haste.get("rating", 0) if isinstance(haste, dict) else 0,
+                "Crit":        crit.get("rating", 0) if isinstance(crit, dict) else 0,
+                "Mastery":     mastery.get("rating", 0) if isinstance(mastery, dict) else 0,
+                "Versatility": vers if isinstance(vers, int) else 0,
+            }
+            top_stat = max(ratings, key=ratings.get)
+
+            # Rendered onto the sheet instead of listed as fields, so page one
+            # reads like every other panel.
+            ranks = mplus_ranks(rio)
+            sheet_stats = [
+                ("Guild",        guild.strip() or "No guild"),
+                ("Spec",         spec),
+                ("Level",        str(level)),
+                ("Achievements", f"{ach_pts:,}"),
+                ("M+ Rating",    f"{mp_score:.0f}" if mp_score else "—"),
+                ("World",        f"#{ranks['world']:,}" if ranks["world"] else "—"),
+                ("Realm",        f"#{ranks['realm']:,}" if ranks["realm"] else "—"),
+                ("Raid",         plain_text(raid_standing.replace("**", ""), 40) or "—"),
+                ("Haste",        stat_percent(haste)),
+                ("Crit",         stat_percent(crit)),
+                ("Mastery",      stat_percent(mastery)),
+                ("Versatility",  f"{vers_dmg:.1f}%"),
+            ]
 
         # ── Gear ──────────────────────────────────────────
         # Discord cannot place images inside field text, so the gear leaves as
@@ -1462,6 +1490,7 @@ class WowGroup(app_commands.Group):
                 },
                 slots=slots,
                 portrait=portrait,
+                stats=sheet_stats,
             )
 
             if sheet:
@@ -1481,28 +1510,6 @@ class WowGroup(app_commands.Group):
                     e1.add_field(name="​", value="\n".join(lines_out[half:]), inline=True)
 
 
-        # ── Secondary stats ────────────────────────
-        # Three inline fields fill a row, and a full row is what makes Discord
-        # draw the embed at its full width — an image alone never widens it.
-        if statistics:
-            haste    = statistics.get("haste",    {})
-            crit     = statistics.get("crit",     {})
-            mastery  = statistics.get("mastery",  {})
-            vers     = statistics.get("versatility", 0)
-            vers_dmg = statistics.get("versatility_damage_done_bonus", 0)
-
-            ratings = {
-                "Haste":       haste.get("rating", 0) if isinstance(haste, dict) else 0,
-                "Crit":        crit.get("rating", 0) if isinstance(crit, dict) else 0,
-                "Mastery":     mastery.get("rating", 0) if isinstance(mastery, dict) else 0,
-                "Versatility": vers if isinstance(vers, int) else 0,
-            }
-            top_stat = max(ratings, key=ratings.get)
-
-            e1.add_field(name="📊 Secondary Stats", value=(
-                f"⚡ Haste **{fmt_stat(haste)}**  ·  🎯 Crit **{fmt_stat(crit)}**\n"
-                f"🔮 Mastery **{fmt_stat(mastery)}**  ·  🛡️ Vers **{vers_dmg:.1f}% ({vers:,})**"
-            ), inline=False)
 
 
 
