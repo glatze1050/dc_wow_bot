@@ -36,7 +36,7 @@ BORDER   = 3
 
 LEFT_X       = PADDING
 RIGHT_X      = WIDTH - PADDING - ICON
-PORTRAIT_X   = (300, 1050)        # the lane between the two slot columns
+PORTRAIT_X   = (330, 1020)        # the lane between the two slot columns
 PORTRAIT_PAD = 10
 
 # Matches the Discord dark embed background so the image reads as one block.
@@ -45,6 +45,7 @@ TEXT        = (220, 222, 228)
 TEXT_DIM    = (142, 146, 151)
 PANEL       = (54, 57, 63)
 ENCHANT_GREEN = (64, 222, 64)   # the green the game prints an enchant in
+ENCHANT_SIZES = (12, 11, 10, 9, 8)   # stepped down until the full name fits
 TEXT_FAINT  = (118, 122, 128)
 EMPTY_SLOT  = (54, 57, 63)
 OUTLINE     = (24, 25, 28)
@@ -119,6 +120,16 @@ def _open_icon(raw: bytes, size: int):
     return image
 
 
+def _enchant_text(draw, text: str, limit: int, fonts: dict):
+    """Shrink before cutting: an enchant name is worth reading in full."""
+    for size in ENCHANT_SIZES:
+        face = fonts[f"enchant{size}"]
+        if _text_width(draw, text, face) <= limit:
+            return text, face
+    face = fonts[f"enchant{ENCHANT_SIZES[-1]}"]
+    return _fit(draw, text, face, limit), face
+
+
 def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool,
                fonts: dict, room: int = 0):
     """One item: icon, quality border, item level, slot name, enchant, gems."""
@@ -147,8 +158,10 @@ def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool,
     enchants  = slot.get("enchants") or []
     enchant_y = name_y + 20
     if not room:
-        room = (x - 16 - PORTRAIT_X[1]) if align_right else (PORTRAIT_X[0] - x - ICON - 26)
-    enchant   = _fit(draw, enchants[0], fonts["enchant"], max(room, 60)) if enchants else ""
+        room = (x - 14 - PORTRAIT_X[1]) if align_right else (PORTRAIT_X[0] - x - ICON - 16)
+    enchant, enchant_font = ("", fonts["slot"])
+    if enchants:
+        enchant, enchant_font = _enchant_text(draw, enchants[0], max(room, 70), fonts)
 
     if align_right:
         draw.text((x - 10 - _text_width(draw, label, fonts["ilvl"]), text_y),
@@ -156,14 +169,14 @@ def _draw_slot(canvas, draw, slot: dict, x: int, y: int, align_right: bool,
         draw.text((x - 10 - _text_width(draw, slot_label, fonts["slot"]), name_y),
                   slot_label, font=fonts["slot"], fill=TEXT_DIM)
         if enchant:
-            draw.text((x - 10 - _text_width(draw, enchant, fonts["enchant"]), enchant_y),
-                      enchant, font=fonts["enchant"], fill=ENCHANT_GREEN)
+            draw.text((x - 10 - _text_width(draw, enchant, enchant_font), enchant_y),
+                      enchant, font=enchant_font, fill=ENCHANT_GREEN)
     else:
         draw.text((x + ICON + 10, text_y), label, font=fonts["ilvl"], fill=colour)
         draw.text((x + ICON + 10, name_y), slot_label, font=fonts["slot"], fill=TEXT_DIM)
         if enchant:
             draw.text((x + ICON + 10, enchant_y), enchant,
-                      font=fonts["enchant"], fill=ENCHANT_GREEN)
+                      font=enchant_font, fill=ENCHANT_GREEN)
 
     # Gems sit along the bottom edge of the icon.
     for index, gem_bytes in enumerate((slot.get("gems") or [])[:3]):
@@ -244,7 +257,8 @@ def render_sheet(header: dict, slots: dict, portrait: bytes | None = None,
     canvas = Image.new("RGBA", (WIDTH, height), BG + (255,))
     draw   = ImageDraw.Draw(canvas)
     fonts  = {"title": _font(28), "sub": _font(19), "ilvl": _font(20), "slot": _font(15),
-              "label": _font(13), "value": _font(19), "enchant": _font(12)}
+              "label": _font(13), "value": _font(19)}
+    fonts.update({f"enchant{size}": _font(size) for size in ENCHANT_SIZES})
 
     draw.text((PADDING, 18), header.get("title", ""), font=fonts["title"],
               fill=header.get("title_colour") or TEXT)
