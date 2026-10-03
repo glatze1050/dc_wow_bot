@@ -16,6 +16,8 @@ from email.utils import parsedate_to_datetime
 from dotenv import load_dotenv
 
 import gear_render
+import mplus_render
+import wcl_render
 
 load_dotenv()
 
@@ -624,6 +626,109 @@ def wcl_parse_emoji(pct: float) -> str:
     if pct >= 25: return "⚪"   # Common
     return "⬜"                  # Poor
 
+
+ART_CACHE_SIZE = 60
+_art_cache: dict = {}
+
+
+async def get_artwork(url: str):
+    """Dungeon splash art, cached — each one is a third of a megabyte."""
+    if not url:
+        return None
+    if url not in _art_cache:
+        _art_cache[url] = await download_bytes(url)
+        if len(_art_cache) > ART_CACHE_SIZE:
+            _art_cache.pop(next(iter(_art_cache)))
+    return _art_cache[url]
+
+
+async def build_mplus_runs(rio: dict) -> list:
+    """Best run per dungeon with its artwork, ready for the panel."""
+    runs = (rio or {}).get("mythic_plus_best_runs", [])[:8]
+    art  = await asyncio.gather(*(get_artwork(r.get("background_image_url", "")) for r in runs))
+    return [
+        {
+            "short_name": run.get("short_name", ""),
+            "dungeon":    run.get("dungeon", ""),
+            "level":      run.get("mythic_level", 0),
+            "score":      run.get("score", 0),
+            "upgrades":   run.get("num_keystone_upgrades", 0),
+            "art":        image,
+        }
+        for run, image in zip(runs, art)
+    ]
+
+
+def read_zone_rankings(wcl: dict) -> dict:
+    """zoneRankings comes back as either a JSON string or a dict."""
+    raw = (wcl or {}).get("zoneRankings")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+    return raw or {}
+
+
+def wcl_table_data(zone: dict):
+    """(summary, rows) shaped the way the Warcraft Logs character page reads."""
+    rows = []
+    for entry in zone.get("rankings") or []:
+        stars = entry.get("allStars") or {}
+        rows.append({
+            "boss":       (entry.get("encounter") or {}).get("name", "?"),
+            "best":       entry.get("rankPercent"),
+            "median":     entry.get("medianPercent"),
+            "dps":        entry.get("bestAmount") or 0,
+            "kills":      entry.get("totalKills") or 0,
+            "fastest_ms": entry.get("fastestKill"),
+            "points":     stars.get("points"),
+            "rank":       stars.get("rank"),
+        })
+    summary = {
+        "best":   zone.get("bestPerformanceAverage"),
+        "median": zone.get("medianPerformanceAverage"),
+        "kills":  sum(r["kills"] for r in rows),
+        "points": sum(r["points"] or 0 for r in rows),
+        "rank":   min((r["rank"] for r in rows if r["rank"]), default=0),
+    }
+    return summary, rows
+
+
+def analyse_logs(summary: dict, rows: list) -> list:
+    """Plain reading of the parses: what is carrying, what is dragging."""
+    killed = [r for r in rows if (r["kills"] or 0) > 0 and r["best"] is not None]
+    if not killed:
+        return []
+
+    notes   = []
+    best    = max(killed, key=lambda r: r["best"])
+    worst   = min(killed, key=lambda r: r["best"])
+    missing = [r["boss"] for r in rows if not (r["kills"] or 0)]
+
+    notes.append(f"🟢 **Strongest:** {best['boss']} — {best['best']:.0f}%")
+    if worst["boss"] != best["boss"]:
+        notes.append(f"🔴 **Weakest:** {worst['boss']} — {worst['best']:.0f}%, "
+                     f"the clearest place to gain points")
+
+    # A wide best-to-median gap means single good pulls, not a reliable floor.
+    spread = [r["best"] - r["median"] for r in killed if r["median"] is not None]
+    if spread:
+        average = sum(spread) / len(spread)
+        if average >= 20:
+            notes.append(f"⚠️ **Inconsistent:** best runs sit {average:.0f} points above your median — "
+                         f"single good pulls rather than a steady floor")
+        elif average <= 8:
+            notes.append(f"✅ **Consistent:** only {average:.0f} points between your best and median runs")
+
+    thin = [r["boss"] for r in killed if (r["kills"] or 0) <= 2]
+    if thin:
+        notes.append(f"🔁 **Thin sample:** {', '.join(thin[:3])} — two kills or fewer, "
+                     f"so those percentiles are noisy")
+    if missing:
+        notes.append(f"⬛ **No kill logged:** {', '.join(missing[:4])}")
+    return notes
+
 # ─────────────────────────────────────────
 #  NEWS SOURCES
 #  1. worldofwarcraft.blizzard.com  — official news & patch notes
@@ -1120,7 +1225,7 @@ class WowGroup(app_commands.Group):
 
             # A long line is what pushes the embed out to its full width.
             e1.add_field(name="🎯 Content Readiness",
-                         value=readiness + "\n" + "━" * 46, inline=False)
+                         value=readiness + "\n" + "━" * 62, inline=False)
 
         elif rio:
             spec = rio.get("active_spec_name", "?")
@@ -1190,10 +1295,9 @@ class WowGroup(app_commands.Group):
             e1.add_field(name="🔮 Mastery",     value=f"**{fmt_stat(mastery)}**", inline=True)
             e1.add_field(name="🛡️ Versatility", value=f"**{vers_dmg:.1f}% ({vers:,})**", inline=True)
             e1.add_field(name="📊 Item Level",  value=f"**{ilvl_eq}** *(avg {ilvl_avg})*" if summary else "—", inline=True)
-            e1.add_field(name="🏆 Top Stat",    value=f"**{top_stat}**", inline=True)
+            e1.add_field(name="🗝️ M+ Rating",  value=f"**{mp_score:.0f}**", inline=True)
 
 
-        e1.set_footer(text="WoW Bot · Page 1/5  —  Profile, Gear & Stats")
         embeds.append(e1)
 
         # ══════════════════════════════════
@@ -1208,7 +1312,6 @@ class WowGroup(app_commands.Group):
             e_items.add_field(name="💎 Gems",      value=f"**{len(gem_lines)}** sockets", inline=True)
             for field_name, field_value in build_item_fields(equipment)[:21]:
                 e_items.add_field(name=field_name, value=field_value, inline=False)
-            e_items.set_footer(text="WoW Bot · Page 2/5  —  Item Details")
             embeds.append(e_items)
 
         # ══════════════════════════════════
@@ -1223,41 +1326,25 @@ class WowGroup(app_commands.Group):
             e2.set_thumbnail(url=thumb_url)
 
         if rio:
-            # M+ Score
+            runs_for_panel = await build_mplus_runs(rio)
             seasons = rio.get("mythic_plus_scores_by_season", [])
-            if seasons:
-                sc     = seasons[0].get("scores", {})
-                all_sc = sc.get("all",    0)
-                tank   = sc.get("tank",   0)
-                healer = sc.get("healer", 0)
-                dps    = sc.get("dps",    0)
-
-                # Score badge
-                if all_sc >= 3000:   score_badge = "🟠 Elite"
-                elif all_sc >= 2500: score_badge = "🟣 Advanced"
-                elif all_sc >= 2000: score_badge = "🔵 Experienced"
-                elif all_sc >= 1500: score_badge = "🟢 Active"
-                elif all_sc > 0:     score_badge = "⬜ Beginner"
-                else:                score_badge = "—"
-
-                e2.add_field(name="🗝️ Mythic+ Score", value=(
-                    f"**{all_sc:.0f}**  {score_badge}\n"
-                    f"🛡️ Tank `{tank:.0f}`  💚 Healer `{healer:.0f}`  ⚔️ DPS `{dps:.0f}`"
-                ), inline=False)
-
-            # Top 5 Runs
-            runs = rio.get("mythic_plus_best_runs", [])[:5]
-            if runs:
-                lines = []
-                for r in runs:
-                    short    = r.get("short_name", r.get("dungeon", "?"))
-                    full     = dungeon_full_name(short)
-                    level    = r.get("mythic_level", "?")
-                    sc_r     = r.get("score", 0)
-                    upgrades = r.get("num_keystone_upgrades", 0)
-                    stars    = "⭐" * upgrades if upgrades else "  "
-                    lines.append(f"🔑 `+{level:>2}` **{full}** {stars} — `{sc_r:.1f} pts`")
-                e2.add_field(name="🏅 Top 5 M+ Runs", value="\n".join(lines), inline=False)
+            scores  = seasons[0].get("scores", {}) if seasons else {}
+            panel = mplus_render.render_mplus(
+                header={
+                    "title":    f"{char_name} — Mythic+",
+                    "subtitle": (seasons[0].get("season", "") if seasons else "").replace("-", " ").title(),
+                },
+                score=scores,
+                runs=runs_for_panel,
+            )
+            if panel:
+                attachments.append(discord.File(io.BytesIO(panel), filename="mplus.png"))
+                e2.set_image(url="attachment://mplus.png")
+                e2.set_thumbnail(url=None)
+            else:
+                for run in runs_for_panel[:5]:
+                    e2.add_field(name=f"🔑 +{run['level']} {run['dungeon']}",
+                                 value=f"`{run['score']:.0f} pts`", inline=True)
 
             profile_url = rio.get("profile_url")
             if profile_url:
@@ -1265,7 +1352,6 @@ class WowGroup(app_commands.Group):
         else:
             e2.description = "*(Raider.IO data unavailable — the character needs a recent login.)*"
 
-        e2.set_footer(text="WoW Bot · Page 3/5  —  Mythic+")
         embeds.append(e2)
 
         # ══════════════════════════════════
@@ -1273,7 +1359,7 @@ class WowGroup(app_commands.Group):
         # ══════════════════════════════════
         e3 = discord.Embed(color=color)
         e3.set_author(
-            name=f"{class_emoji}  {char_name}  —  PvP & Achievements",
+            name=f"{class_emoji}  {char_name}  —  PvP",
             icon_url=thumb_url,
         )
         if thumb_url:
@@ -1309,34 +1395,7 @@ class WowGroup(app_commands.Group):
             else:
                 e3.add_field(name="🏆 PvP Stats", value="*No PvP activity this season.*", inline=False)
 
-        # ── Achievements ──────────────────────────────────────
-        if achievements:
-            ach_pts    = (summary or {}).get("achievement_points", 0)
-            ach_list   = achievements.get("achievements", [])
-            total_done = len([a for a in ach_list if a.get("completed_timestamp")])
 
-            recent = sorted(
-                [a for a in ach_list if a.get("completed_timestamp")],
-                key=lambda a: a["completed_timestamp"],
-                reverse=True,
-            )[:8]
-
-            header = f"🏅 **{ach_pts:,} points** · {total_done:,} completed\n"
-            lines  = []
-            for a in recent:
-                ts    = a["completed_timestamp"]
-                dt    = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-                dts   = f"<t:{int(dt.timestamp())}:d>"
-                aname = a.get("achievement", {}).get("name", "Unknown")
-                lines.append(f"🏆 **{aname}** — {dts}")
-
-            e3.add_field(
-                name="🎖️ Achievements  *(8 most recent)*",
-                value=header + "\n".join(lines),
-                inline=False,
-            )
-
-        e3.set_footer(text="WoW Bot · Page 5/5  —  PvP & Achievements")
 
         # ══════════════════════════════════
         #  EMBED 4 — WARCRAFT LOGS
@@ -1350,50 +1409,36 @@ class WowGroup(app_commands.Group):
             e4.set_thumbnail(url=thumb_url)
 
         if wcl:
-            zr_raw = wcl.get("zoneRankings")
-            # zoneRankings comes back as either a JSON string or a dict
-            if isinstance(zr_raw, str):
-                try:    zr = json.loads(zr_raw)
-                except: zr = {}
-            else:
-                zr = zr_raw or {}
+            zone = read_zone_rankings(wcl)
+            zone_field = zone.get("zone")
+            zone_name = (zone_field.get("name") if isinstance(zone_field, dict)
+                         else zone.get("zoneName", "Current Raid"))
+            difficulty = {3: "Normal", 4: "Heroic", 5: "Mythic"}.get(zone.get("difficulty"), "")
+            summary, boss_rows = wcl_table_data(zone)
 
-            best_avg   = zr.get("bestPerformanceAverage")
-            median_avg = zr.get("medianPerformanceAverage")
-            zone_name  = (zr.get("zone") or {}).get("name") if isinstance(zr.get("zone"), dict) else zr.get("zoneName", "Current Raid")
-            difficulty = zr.get("difficulty")
-            rankings   = zr.get("rankings", []) or []
+            table = wcl_render.render_wcl(
+                header={
+                    "title":    f"{char_name} — {zone_name}",
+                    "subtitle": difficulty or "All difficulties",
+                },
+                summary=summary,
+                bosses=boss_rows,
+            ) if boss_rows else None
 
-            if best_avg is not None:
-                badge = wcl_parse_emoji(best_avg)
-                diff_label = {3: "Normal", 4: "Heroic", 5: "Mythic"}.get(difficulty, "")
-                header_val = (
-                    f"{badge} **Best Avg:** `{best_avg:.1f}%`\n"
-                    f"📊 **Median Avg:** `{(median_avg or 0):.1f}%`"
-                )
-                if diff_label:
-                    header_val = f"⚔️ **{zone_name}** — {diff_label}\n" + header_val
-                elif zone_name:
-                    header_val = f"⚔️ **{zone_name}**\n" + header_val
-                e4.add_field(name="🗡️ Overall Performance", value=header_val, inline=False)
+            if table:
+                attachments.append(discord.File(io.BytesIO(table), filename="logs.png"))
+                e4.set_image(url="attachment://logs.png")
+                e4.set_thumbnail(url=None)
 
-            # Best parse per boss
-            if rankings:
-                lines = []
-                for r in rankings[:12]:
-                    enc   = r.get("encounter", {}) or {}
-                    bname = enc.get("name", "?")
-                    pct   = r.get("rankPercent")
-                    if pct is None:
-                        continue
-                    spec  = r.get("spec", "")
-                    dps   = r.get("amount", 0)
-                    badge = wcl_parse_emoji(pct)
-                    spec_str = f" *({spec})*" if spec else ""
-                    dps_str  = f" · `{dps:,.0f}`" if dps else ""
-                    lines.append(f"{badge} **{bname}**{spec_str} — `{pct:.1f}%`{dps_str}")
-                if lines:
-                    e4.add_field(name="🏆 Boss-Parses  *(Best)*", value="\n".join(lines), inline=False)
+            # What the numbers actually say, rather than just showing them.
+            notes = analyse_logs(summary, boss_rows)
+            if notes:
+                e4.add_field(name="🔎 Log Analysis",
+                             value="\n".join(notes)[:1024], inline=False)
+
+            if summary.get("best") is None and not boss_rows:
+                e4.description = "*No raid logs found for this character.*"
+
 
             # Link to the Warcraft Logs profile
             wcl_id = wcl.get("id")
@@ -1422,7 +1467,6 @@ class WowGroup(app_commands.Group):
                     f"🟣 M `{progress_bar(killed_m, total)}` **{killed_m}/{total}**"
                 ), inline=True)
 
-        e4.set_footer(text="WoW Bot · Page 4/5  —  Raid Logs & Progression  |  Data: Blizzard API + Raider.IO + Warcraft Logs")
         embeds.append(e4)
         embeds.append(e3)
 
