@@ -75,13 +75,15 @@ def _cell(draw, text: str, left: int, width: int, align: str, y: int, face, colo
     draw.text((x, y), text, font=face, fill=colour)
 
 
-def render_wcl(header: dict, summary: dict, bosses: list) -> bytes | None:
+def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> bytes | None:
     """Draw the table and return PNG bytes, or None if Pillow is unavailable."""
     if not PILLOW_AVAILABLE:
         return None
 
-    rows   = bosses[:14]
-    height = HEADER_H + SUMMARY_H + HEAD_ROW + len(rows) * ROW_H + MARGIN
+    rows     = bosses[:14]
+    notes    = list(notes)[:3]
+    notes_h  = (len(notes) * 26 + 18) if notes else 0
+    height   = HEADER_H + SUMMARY_H + HEAD_ROW + len(rows) * ROW_H + notes_h + MARGIN
     canvas = Image.new("RGBA", (WIDTH, height), BG + (255,))
     draw   = ImageDraw.Draw(canvas)
     fonts  = {
@@ -155,8 +157,17 @@ def render_wcl(header: dict, summary: dict, bosses: list) -> bytes | None:
             _cell(draw, value, x, width, align, y + 8, fonts["cell"], colour)
             x += width
 
-    draw.rectangle([MARGIN, HEADER_H + SUMMARY_H, WIDTH - MARGIN, top + len(rows) * ROW_H],
+    table_bottom = top + len(rows) * ROW_H
+    draw.rectangle([MARGIN, HEADER_H + SUMMARY_H, WIDTH - MARGIN, table_bottom],
                    outline=OUTLINE, width=2)
+
+    # What the numbers say, kept with the numbers rather than in the message.
+    for index, (lead, body, colour) in enumerate(notes):
+        y = table_bottom + 14 + index * 26
+        draw.text((MARGIN + 12, y), lead, font=fonts["head"], fill=colour)
+        draw.text((MARGIN + 12 + text_width(draw, lead, fonts["head"]) + 8, y),
+                  fit(draw, body, fonts["head"], WIDTH - MARGIN * 2 - 160), 
+                  font=fonts["head"], fill=TEXT_DIM)
     return to_png(canvas)
 
 

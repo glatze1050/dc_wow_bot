@@ -548,18 +548,34 @@ async def build_gear_slots(equipment: dict, region: str):
 # ─────────────────────────────────────────
 #  RAIDERIO API
 # ─────────────────────────────────────────
+RAIDERIO_TIMEOUT = aiohttp.ClientTimeout(total=15)
+
+
 async def get_raiderio(realm: str, name: str, region: str) -> dict:
+    """Raider.IO rate limits and occasionally times out, so give it a second go."""
     params = {
         "region": region, "realm": realm, "name": name,
         "fields": "mythic_plus_scores_by_season:current,raid_progression,mythic_plus_best_runs,gear",
     }
-    async with aiohttp.ClientSession() as s:
-        async with s.get("https://raider.io/api/v1/characters/profile", params=params) as r:
-            if r.status == 400:
-                raise ValueError("Character not found on Raider.IO.")
-            if r.status != 200:
-                raise ValueError(f"Raider.IO error ({r.status})")
-            return await r.json()
+    last_error = None
+    for attempt in range(2):
+        try:
+            async with aiohttp.ClientSession(timeout=RAIDERIO_TIMEOUT) as session:
+                async with session.get("https://raider.io/api/v1/characters/profile",
+                                       params=params) as response:
+                    if response.status == 400:
+                        raise ValueError("Character not found on Raider.IO.")
+                    if response.status == 429:
+                        last_error = ValueError("Raider.IO rate limit (429)")
+                    elif response.status != 200:
+                        last_error = ValueError(f"Raider.IO error ({response.status})")
+                    else:
+                        return await response.json()
+        except asyncio.TimeoutError:
+            last_error = ValueError("Raider.IO timed out")
+        if attempt == 0:
+            await asyncio.sleep(1.5)
+    raise last_error or ValueError("Raider.IO unavailable")
 
 # ─────────────────────────────────────────
 #  WARCRAFT LOGS API  (v2 GraphQL)
@@ -780,38 +796,110 @@ def wcl_table_data(zone: dict):
 
 
 def analyse_logs(summary: dict, rows: list) -> list:
-    """Plain reading of the parses: what is carrying, what is dragging."""
+    """(lead, detail, colour) lines read off the parses, drawn onto the table."""
     killed = [r for r in rows if (r["kills"] or 0) > 0 and r["best"] is not None]
     if not killed:
         return []
 
-    notes   = []
+    green, red, amber, grey = (30, 200, 60), (230, 80, 80), (255, 180, 60), (150, 150, 150)
     best    = max(killed, key=lambda r: r["best"])
     worst   = min(killed, key=lambda r: r["best"])
     missing = [r["boss"] for r in rows if not (r["kills"] or 0)]
+    notes   = [("Strongest", f"{best['boss']}  ({best['best']:.0f})", green)]
 
-    notes.append(f"🟢 **Strongest:** {best['boss']} — {best['best']:.0f}%")
     if worst["boss"] != best["boss"]:
-        notes.append(f"🔴 **Weakest:** {worst['boss']} — {worst['best']:.0f}%, "
-                     f"the clearest place to gain points")
+        notes.append(("Weakest",
+                      f"{worst['boss']}  ({worst['best']:.0f})  —  most room to gain",
+                      red))
 
     # A wide best-to-median gap means single good pulls, not a reliable floor.
     spread = [r["best"] - r["median"] for r in killed if r["median"] is not None]
     if spread:
         average = sum(spread) / len(spread)
         if average >= 20:
-            notes.append(f"⚠️ **Inconsistent:** best runs sit {average:.0f} points above your median — "
-                         f"single good pulls rather than a steady floor")
+            notes.append(("Inconsistent",
+                          f"best runs sit {average:.0f} points above the median", amber))
         elif average <= 8:
-            notes.append(f"✅ **Consistent:** only {average:.0f} points between your best and median runs")
-
-    thin = [r["boss"] for r in killed if (r["kills"] or 0) <= 2]
-    if thin:
-        notes.append(f"🔁 **Thin sample:** {', '.join(thin[:3])} — two kills or fewer, "
-                     f"so those percentiles are noisy")
-    if missing:
-        notes.append(f"⬛ **No kill logged:** {', '.join(missing[:4])}")
+            notes.append(("Consistent",
+                          f"only {average:.0f} points between best and median", green))
+    if missing and len(notes) < 3:
+        notes.append(("Not killed", ", ".join(missing[:4]), grey))
     return notes
+
+
+ART_CACHE_SIZE = 60
+_art_cache: dict = {}
+
+
+async def get_artwork(url: str):
+    """Dungeon splash art, cached — each one is a third of a megabyte."""
+    if not url:
+        return None
+    if url not in _art_cache:
+        _art_cache[url] = await download_bytes(url)
+        if len(_art_cache) > ART_CACHE_SIZE:
+            _art_cache.pop(next(iter(_art_cache)))
+    return _art_cache[url]
+
+
+async def build_mplus_runs(rio: dict) -> list:
+    """Best run per dungeon with its artwork, ready for the panel."""
+    runs = (rio or {}).get("mythic_plus_best_runs", [])[:8]
+    art  = await asyncio.gather(*(get_artwork(r.get("background_image_url", "")) for r in runs))
+    return [
+        {
+            "short_name": run.get("short_name", ""),
+            "dungeon":    run.get("dungeon", ""),
+            "level":      run.get("mythic_level", 0),
+            "score":      run.get("score", 0),
+            "upgrades":   run.get("num_keystone_upgrades", 0),
+            "art":        image,
+        }
+        for run, image in zip(runs, art)
+    ]
+
+
+def read_zone_rankings(wcl: dict) -> dict:
+    """zoneRankings comes back as either a JSON string or a dict."""
+    raw = (wcl or {}).get("zoneRankings")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+    return raw or {}
+
+
+def wcl_number(value):
+    """Warcraft Logs writes "-" where a character is unranked."""
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def wcl_table_data(zone: dict):
+    """(summary, rows) shaped the way the Warcraft Logs character page reads."""
+    rows = []
+    for entry in zone.get("rankings") or []:
+        stars = entry.get("allStars") or {}
+        rows.append({
+            "boss":       (entry.get("encounter") or {}).get("name", "?"),
+            "best":       wcl_number(entry.get("rankPercent")),
+            "median":     wcl_number(entry.get("medianPercent")),
+            "dps":        wcl_number(entry.get("bestAmount")) or 0,
+            "kills":      wcl_number(entry.get("totalKills")) or 0,
+            "fastest_ms": wcl_number(entry.get("fastestKill")),
+            "points":     wcl_number(stars.get("points")),
+            "rank":       wcl_number(stars.get("rank")),
+        })
+    summary = {
+        "best":   zone.get("bestPerformanceAverage"),
+        "median": zone.get("medianPerformanceAverage"),
+        "kills":  sum(r["kills"] for r in rows),
+        "points": sum(r["points"] or 0 for r in rows),
+        "rank":   min((r["rank"] for r in rows if r["rank"]), default=0) if rows else 0,
+    }
+    return summary, rows
+
+
 
 # ─────────────────────────────────────────
 #  NEWS SOURCES
@@ -1211,28 +1299,31 @@ class WowGroup(app_commands.Group):
         blizzard_ok = bool(BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET)
         wcl_ok      = bool(WCL_CLIENT_ID and WCL_CLIENT_SECRET)
 
-        async def safe(coro):
+        async def safe(coro, label: str = ""):
+            """A missing source must not sink the command, but it must be visible."""
             try:
                 return await coro
-            except Exception:
+            except Exception as exc:
+                print(f"[WARN] {label or 'lookup'} failed for {name}-{realm}: "
+                      f"{type(exc).__name__}: {exc}")
                 return None
 
         if blizzard_ok:
             summary, equipment, statistics, achievements, pvp, char_media, rio, wcl = await asyncio.gather(
-                safe(get_summary(realm, name, region)),
-                safe(get_equipment(realm, name, region)),
-                safe(get_statistics(realm, name, region)),
-                safe(get_achievements(realm, name, region)),
-                safe(get_pvp_summary(realm, name, region)),
-                safe(get_character_media(realm, name, region)),
-                safe(get_raiderio(realm, name, region)),
-                safe(get_wcl_character(realm, name, region)) if wcl_ok else asyncio.sleep(0, result=None),
+                safe(get_summary(realm, name, region), "summary"),
+                safe(get_equipment(realm, name, region), "equipment"),
+                safe(get_statistics(realm, name, region), "statistics"),
+                safe(get_achievements(realm, name, region), "achievements"),
+                safe(get_pvp_summary(realm, name, region), "pvp"),
+                safe(get_character_media(realm, name, region), "character media"),
+                safe(get_raiderio(realm, name, region), "raider.io"),
+                safe(get_wcl_character(realm, name, region), "warcraft logs") if wcl_ok else asyncio.sleep(0, result=None),
             )
         else:
             summary = equipment = statistics = achievements = pvp = char_media = None
             rio, wcl = await asyncio.gather(
-                safe(get_raiderio(realm, name, region)),
-                safe(get_wcl_character(realm, name, region)) if wcl_ok else asyncio.sleep(0, result=None),
+                safe(get_raiderio(realm, name, region), "raider.io"),
+                safe(get_wcl_character(realm, name, region), "warcraft logs") if wcl_ok else asyncio.sleep(0, result=None),
             )
 
         if not summary and not rio:
@@ -1291,7 +1382,6 @@ class WowGroup(app_commands.Group):
             ilvl_eq     = summary.get("equipped_item_level", 0)
             ilvl_avg    = summary.get("average_item_level",  0)
             ach_pts     = summary.get("achievement_points",  0)
-            readiness   = content_readiness(ilvl_eq)
 
             last_login_str = "Unknown"
             ts = summary.get("last_login_timestamp")
@@ -1304,12 +1394,9 @@ class WowGroup(app_commands.Group):
                 f"🏛️ {guild_str}\n"
                 f"📊 Level **{level}** · iLvl **{ilvl_eq}** *(avg {ilvl_avg})*\n"
                 f"🏆 **{ach_pts:,}** Achievement Points\n"
-                f"🕒 Last online: {last_login_str}"
+                f"🕒 Last online: {last_login_str}" + "\n" + "━" * 62
             ), inline=False)
 
-            # A long line is what pushes the embed out to its full width.
-            e1.add_field(name="🎯 Content Readiness",
-                         value=readiness + "\n" + "━" * 62, inline=False)
 
         elif rio:
             spec = rio.get("active_spec_name", "?")
@@ -1333,7 +1420,8 @@ class WowGroup(app_commands.Group):
             sheet = gear_render.render_sheet(
                 header={
                     "title":    f"{char_name} — {realm_name} ({region.upper()})",
-                    "subtitle": f"{char_class}  ·  Ø {avg_ilvl} iLvl",
+                    "subtitle": (f"{char_class}  ·  Ø {avg_ilvl} iLvl"
+                                 + (f"  ·  M+ {mp_score:.0f}" if mp_score else "")),
                 },
                 slots=slots,
                 portrait=portrait,
@@ -1537,18 +1625,13 @@ class WowGroup(app_commands.Group):
                 },
                 summary=summary,
                 bosses=boss_rows,
+                notes=analyse_logs(summary, boss_rows),
             ) if boss_rows else None
 
             if table:
                 attachments.append(discord.File(io.BytesIO(table), filename="logs.png"))
                 e4.set_image(url="attachment://logs.png")
                 e4.set_thumbnail(url=None)
-
-            # What the numbers actually say, rather than just showing them.
-            notes = analyse_logs(summary, boss_rows)
-            if notes:
-                e4.add_field(name="🔎 Log Analysis",
-                             value="\n".join(notes)[:1024], inline=False)
 
             if summary.get("best") is None and not boss_rows:
                 e4.description = "*No raid logs found for this character.*"
@@ -1615,9 +1698,12 @@ class WowGroup(app_commands.Group):
     ):
         await interaction.response.defer()
 
-        async def safe(coro):
-            try:    return await coro
-            except: return None
+        async def safe(coro, label: str = ""):
+            try:
+                return await coro
+            except Exception as exc:
+                print(f"[WARN] compare {label or 'lookup'} failed: {type(exc).__name__}: {exc}")
+                return None
 
         blizzard_ok = bool(BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET)
 
