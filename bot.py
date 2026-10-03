@@ -174,6 +174,32 @@ def error_embed(msg: str) -> discord.Embed:
 def is_admin(interaction: discord.Interaction) -> bool:
     return interaction.user.guild_permissions.administrator
 
+RAID_DIFFICULTIES = (
+    ("normal_bosses_killed", "Normal"),
+    ("heroic_bosses_killed", "Heroic"),
+    ("mythic_bosses_killed", "Mythic"),
+)
+
+
+def raid_status(rio: dict) -> str:
+    """Furthest the character has got in any current raid, hardest mode first."""
+    best_score, best_text = -1, ""
+    for raid_name, progress in ((rio or {}).get("raid_progression") or {}).items():
+        total = progress.get("total_bosses") or 0
+        if not total:
+            continue
+        for weight, (key, label) in enumerate(RAID_DIFFICULTIES):
+            killed = progress.get(key) or 0
+            if not killed:
+                continue
+            score = weight * 1000 + killed
+            if score > best_score:
+                best_score = score
+                best_text  = (f"**{killed}/{total}** {label} — "
+                              f"{raid_name.replace(chr(45), chr(32)).title()}")
+    return best_text
+
+
 def mp_colour(score: float) -> int:
     if score >= 3000: return 0xFF8000
     if score >= 2500: return 0x9B59B6
@@ -1357,6 +1383,7 @@ class WowGroup(app_commands.Group):
         color       = CLASS_COLORS.get(char_class, mp_colour(mp_score))
         class_emoji = CLASS_EMOJIS.get(char_class, "⚔️")
 
+        raid_standing = raid_status(rio)
         char_name  = summary.get("name", name.capitalize()) if summary else (rio or {}).get("name", name.capitalize())
         realm_name = summary.get("realm", {}).get("name", realm) if summary else (rio or {}).get("realm", realm)
 
@@ -1403,7 +1430,9 @@ class WowGroup(app_commands.Group):
                 f"🏛️ {guild_str}\n"
                 f"📊 Level **{level}** · iLvl **{ilvl_eq}** *(avg {ilvl_avg})*\n"
                 f"🏆 **{ach_pts:,}** Achievement Points\n"
-                f"🕒 Last online: {last_login_str}" + "\n" + "━" * 62
+                f"🕒 Last online: {last_login_str}"
+                + (f"\n🏰 {raid_standing}" if raid_standing else "")
+                + "\n" + "━" * 62
             ), inline=False)
 
 
@@ -1566,45 +1595,6 @@ class WowGroup(app_commands.Group):
             embeds.append(e_dungeons)
 
         # ══════════════════════════════════
-        #  EMBED 3 — PvP + ACHIEVEMENTS
-        # ══════════════════════════════════
-        e3 = discord.Embed(color=color)
-        e3.set_author(
-            name=f"{class_emoji}  {char_name}  —  PvP",
-            icon_url=thumb_url,
-        )
-        if thumb_url:
-            e3.set_thumbnail(url=thumb_url)
-
-        # ── PvP ───────────────────────────────────────────────
-        if pvp:
-            brackets = pvp.get("brackets", [])
-            pvp_lines = []
-            for bracket in brackets:
-                b_type  = bracket.get("bracket", {}).get("type", "")
-                rating  = bracket.get("rating", 0)
-                wins    = bracket.get("season_match_statistics", {}).get("won", 0)
-                losses  = bracket.get("season_match_statistics", {}).get("lost", 0)
-                total   = wins + losses
-                winrate = round(wins / total * 100) if total > 0 else 0
-
-                if b_type == "ARENA_2v2":   label = "⚔️ 2v2 Arena"
-                elif b_type == "ARENA_3v3": label = "⚔️ 3v3 Arena"
-                elif b_type == "BATTLEGROUND": label = "🏹 Rated BG"
-                elif b_type == "ARENA_SKIRMISH": label = "🗡️ Skirmish"
-                elif b_type == "SHUFFLE":   label = "🔀 Solo Shuffle"
-                else:                       label = b_type.replace("_", " ").title()
-
-                if rating > 0 or total > 0:
-                    pvp_lines.append(
-                        f"**{label}**\n"
-                        f"Rating: **{rating}** · {wins}W/{losses}L · {winrate}% WR"
-                    )
-
-            if pvp_lines:
-                e3.add_field(name="🏆 PvP Stats", value="\n\n".join(pvp_lines), inline=False)
-            else:
-                e3.add_field(name="🏆 PvP Stats", value="*No PvP activity this season.*", inline=False)
 
 
 
@@ -1657,22 +1647,7 @@ class WowGroup(app_commands.Group):
         else:
             e4.description = "*This character has no public raid logs.*"
 
-        # Raid progression belongs with the logs, not on the Mythic+ page.
-        if rio and rio.get("raid_progression"):
-            e4.add_field(name="⠀", value="**🏰 Raid Progression**", inline=False)
-            for raid_name, progress in rio["raid_progression"].items():
-                killed_n = progress.get("normal_bosses_killed", 0)
-                killed_h = progress.get("heroic_bosses_killed", 0)
-                killed_m = progress.get("mythic_bosses_killed", 0)
-                total    = progress.get("total_bosses", 0)
-                e4.add_field(name=f"📍 {raid_name.replace(chr(45), chr(32)).title()}", value=(
-                    f"🟢 N `{progress_bar(killed_n, total)}` **{killed_n}/{total}**\n"
-                    f"🔵 H `{progress_bar(killed_h, total)}` **{killed_h}/{total}**\n"
-                    f"🟣 M `{progress_bar(killed_m, total)}` **{killed_m}/{total}**"
-                ), inline=True)
-
         embeds.append(e4)
-        embeds.append(e3)
 
         await interaction.followup.send(embeds=embeds, files=attachments or discord.utils.MISSING)
 
