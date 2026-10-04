@@ -793,6 +793,104 @@ async def dungeon_rankings(realm: str, name: str, region: str):
     return summary, rows
 
 
+
+async def character_header(realm: str, name: str, region: str) -> dict:
+    """Who a character is, and which colour belongs to them."""
+    summary = None
+    try:
+        summary = await get_summary(realm, name, region)
+    except Exception as exc:
+        print(f"[WARN] summary failed for {name}-{realm}: {type(exc).__name__}: {exc}")
+    char_class = (summary or {}).get("character_class", {}).get("name", "")
+    return {
+        "name":   (summary or {}).get("name", name.capitalize()),
+        "realm":  (summary or {}).get("realm", {}).get("name", realm),
+        "emoji":  CLASS_EMOJIS.get(char_class, "⚔️"),
+        "colour": CLASS_COLORS.get(char_class, 0x888888),
+        "rgb":    render_util.rgb(CLASS_COLORS.get(char_class)),
+    }
+
+
+async def mplus_panels(who: dict, realm: str, name: str, region: str):
+    """(embeds, files) for the Mythic+ side: the panel and the dungeon table."""
+    embeds, files = [], []
+    try:
+        rio = await get_raiderio(realm, name, region)
+    except Exception as exc:
+        print(f"[WARN] raider.io failed for {name}-{realm}: {type(exc).__name__}: {exc}")
+        rio = None
+
+    if rio:
+        seasons = rio.get("mythic_plus_scores_by_season", [])
+        panel = await asyncio.to_thread(
+            mplus_render.render_mplus,
+            header={
+                "title":        f"{who['name']} — Mythic+",
+                "title_colour": who["rgb"],
+                "subtitle": (seasons[0].get("season", "") if seasons else "").replace("-", " ").title(),
+            },
+            score=seasons[0].get("scores", {}) if seasons else {},
+            runs=await build_mplus_runs(rio),
+        )
+        embed = discord.Embed(color=who["colour"])
+        embed.set_author(name=f"{who['emoji']}  {who['name']}  —  Mythic+")
+        if panel:
+            files.append(discord.File(io.BytesIO(panel), filename="mplus.png"))
+            embed.set_image(url="attachment://mplus.png")
+        embeds.append(embed)
+
+    try:
+        summary, rows = await dungeon_rankings(realm, name, region)
+    except Exception as exc:
+        print(f"[WARN] Dungeon rankings failed: {exc}")
+        return embeds, files
+
+    if rows:
+        table = await asyncio.to_thread(
+            wcl_render.render_dungeons,
+            header={"title": f"{who['name']} — Mythic+ Dungeons",
+                    "subtitle": "Points & Damage by level"},
+            summary=summary, rows=rows)
+        embed = discord.Embed(color=who["colour"])
+        embed.set_author(name=f"{who['emoji']}  {who['name']}  —  Dungeon Logs")
+        if table:
+            files.append(discord.File(io.BytesIO(table), filename="dungeons.png"))
+            embed.set_image(url="attachment://dungeons.png")
+        embeds.append(embed)
+    return embeds, files
+
+
+async def raid_panels(who: dict, realm: str, name: str, region: str):
+    """(embeds, files) for the raid side: the Warcraft Logs boss table."""
+    try:
+        wcl = await get_wcl_character(realm, name, region)
+    except Exception as exc:
+        print(f"[WARN] warcraft logs failed for {name}-{realm}: {type(exc).__name__}: {exc}")
+        return [], []
+
+    zone       = read_zone_rankings(wcl)
+    zone_field = zone.get("zone")
+    zone_name  = (zone_field.get("name") if isinstance(zone_field, dict)
+                  else zone.get("zoneName", "Current Raid"))
+    difficulty = {3: "Normal", 4: "Heroic", 5: "Mythic"}.get(zone.get("difficulty"), "")
+    summary, rows = wcl_table_data(zone)
+    if not rows:
+        return [], []
+
+    table = await asyncio.to_thread(
+        wcl_render.render_wcl,
+        header={"title": f"{who['name']} — {zone_name}",
+                "subtitle": difficulty or "All difficulties"},
+        summary=summary, bosses=rows, notes=analyse_logs(summary, rows))
+    embed = discord.Embed(color=who["colour"])
+    embed.set_author(name=f"{who['emoji']}  {who['name']}  —  {zone_name}")
+    files = []
+    if table:
+        files.append(discord.File(io.BytesIO(table), filename="logs.png"))
+        embed.set_image(url="attachment://logs.png")
+    return [embed], files
+
+
 ART_CACHE_SIZE = 60
 _art_cache: dict = {}
 
@@ -1467,7 +1565,8 @@ class WowGroup(app_commands.Group):
                     portrait = await download_bytes(asset["value"])
                     break
 
-            sheet = gear_render.render_sheet(
+            sheet = await asyncio.to_thread(
+                gear_render.render_sheet,
                 header={
                     "title":        f"{char_name} — {realm_name} ({region.upper()})",
                     "title_colour": class_colour,
@@ -1521,7 +1620,8 @@ class WowGroup(app_commands.Group):
             runs_for_panel = await build_mplus_runs(rio)
             seasons = rio.get("mythic_plus_scores_by_season", [])
             scores  = seasons[0].get("scores", {}) if seasons else {}
-            panel = mplus_render.render_mplus(
+            panel = await asyncio.to_thread(
+                mplus_render.render_mplus,
                 header={
                     "title":        f"{char_name} — Mythic+",
                     "title_colour": class_colour,
@@ -1557,7 +1657,8 @@ class WowGroup(app_commands.Group):
             e_dungeons = discord.Embed(color=color)
             e_dungeons.set_author(name=f"{class_emoji}  {char_name}  —  Dungeon Logs",
                                   icon_url=thumb_url)
-            dungeon_table = wcl_render.render_dungeons(
+            dungeon_table = await asyncio.to_thread(
+                wcl_render.render_dungeons,
                 header={"title": f"{char_name} — Mythic+ Dungeons",
                         "subtitle": "Points & Damage by level"},
                 summary=dungeon_summary,
@@ -1598,7 +1699,8 @@ class WowGroup(app_commands.Group):
             difficulty = {3: "Normal", 4: "Heroic", 5: "Mythic"}.get(zone.get("difficulty"), "")
             summary, boss_rows = wcl_table_data(zone)
 
-            table = wcl_render.render_wcl(
+            table = await asyncio.to_thread(
+                wcl_render.render_wcl,
                 header={
                     "title":    f"{char_name} — {zone_name}",
                     "subtitle": difficulty or "All difficulties",

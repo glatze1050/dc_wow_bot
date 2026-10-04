@@ -98,11 +98,32 @@ async def run_one(name, realm, region):
     return True
 
 
+async def run_panels(name, realm, region):
+    """The two standalone commands share builders with /wow check; a change to
+    one has already silently removed the other, so both are exercised."""
+    who = await B.character_header(realm, name, region)
+    print("")
+    print(f"=== panels for {who['name']} ===")
+    ok = True
+    for label, builder in (("mplus", B.mplus_panels), ("raid", B.raid_panels)):
+        embeds, files = await builder(who, realm, name, region)
+        print(f"  /{label}: embeds={len(embeds)} files={len(files)}")
+        if not embeds:
+            print(f"   nothing returned for {label}")
+            ok = False
+        for handle in files:
+            data = handle.fp.getvalue()
+            assert data, f"{handle.filename} is empty"
+            print(f"   {handle.filename}: {len(data) // 1024} KB")
+    return ok
+
+
 async def main():
     results = []
     for name, realm, region in CHARACTERS:
         try:
             results.append(await run_one(name, realm, region))
+            results.append(await run_panels(name, realm, region))
         except Exception:
             import traceback
             traceback.print_exc()
