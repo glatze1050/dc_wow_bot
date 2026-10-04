@@ -7,8 +7,7 @@ from __future__ import annotations
 
 from render_util import (
     ACCENT, BG, OUTLINE, PANEL, PILLOW_AVAILABLE, TEXT, TEXT_DIM,
-    centred, fit, font, open_cover, role_colour, shade, spec_label,
-    text_width, to_png,
+    centred, fit, font, open_cover, shade, text_width, to_png,
 )
 
 if PILLOW_AVAILABLE:
@@ -76,12 +75,6 @@ def _draw_tile(canvas, draw, run: dict, x: int, y: int, fonts: dict):
             art = None
     if not art:
         draw.rectangle([x, y, x + TILE_W, y + ART_H], fill=PANEL)
-
-    # The spec takes the corner the abbreviation used to have.
-    spec = run.get("spec")
-    if spec:
-        draw.text((x + 10, y + 8), fit(draw, spec_label(spec), fonts["short"], TILE_W - 20),
-                  font=fonts["short"], fill=role_colour(spec))
 
     level = run.get("level")
     if level:
