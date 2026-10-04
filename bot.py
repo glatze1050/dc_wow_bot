@@ -119,6 +119,7 @@ def load_data() -> dict:
         "seen_news":     [],
         "news_schema":   0,
         "characters":    {},
+        "command_channels": {},
     }
 
 def save_data():
@@ -130,6 +131,7 @@ def save_data():
             "seen_news":     seen_news,
             "news_schema":   news_schema,
             "characters":    character_history,
+            "command_channels": command_channels,
         }, f, indent=2)
 
 _data            = load_data()
@@ -139,6 +141,8 @@ maint_channel_id = _data.get("maint_channel", None)
 seen_news: list  = _data.get("seen_news",     [])
 news_schema: int = _data.get("news_schema",   0)
 character_history: dict = _data.get("characters", {})
+# Per guild; an empty list means the lookups are allowed anywhere.
+command_channels: dict = _data.get("command_channels", {})
 
 # ─────────────────────────────────────────
 #  BLIZZARD TOKEN CACHE
@@ -182,6 +186,21 @@ def error_embed(msg: str) -> discord.Embed:
     )
     embed.set_footer(text="WoW Bot  ·  Error")
     return embed
+
+def allowed_channels(guild_id) -> list:
+    return command_channels.get(str(guild_id), [])
+
+
+def channel_allowed(interaction: discord.Interaction) -> bool:
+    """No channels configured means no restriction, so a fresh install works."""
+    allowed = allowed_channels(interaction.guild_id)
+    return not allowed or interaction.channel_id in allowed
+
+
+def wrong_channel_embed(interaction: discord.Interaction) -> discord.Embed:
+    places = "  ".join(f"<#{cid}>" for cid in allowed_channels(interaction.guild_id))
+    return error_embed(f"Character lookups are limited to: {places}")
+
 
 def is_admin(interaction: discord.Interaction) -> bool:
     return interaction.user.guild_permissions.administrator
@@ -1457,6 +1476,9 @@ class WowGroup(app_commands.Group):
     ])
     @app_commands.autocomplete(name=character_autocomplete, realm=realm_autocomplete)
     async def check(self, interaction: discord.Interaction, name: str, realm: str = "", region: str = "eu"):
+        if not channel_allowed(interaction):
+            return await interaction.response.send_message(
+                embed=wrong_channel_embed(interaction), ephemeral=True)
         await interaction.response.send_message(embed=working_embed(name, realm or "…"))
 
         # A name picked from the history already knows where it lives.
@@ -2007,6 +2029,9 @@ class WowSetupGroup(app_commands.Group):
         if not is_admin(interaction):
             return await interaction.response.send_message(
                 embed=error_embed("Administrators only."), ephemeral=True)
+        if not channel_allowed(interaction):
+            return await interaction.response.send_message(
+                embed=wrong_channel_embed(interaction), ephemeral=True)
         await interaction.response.send_message(embed=working_embed(name, realm or "…"))
 
         if not realm:
@@ -2027,6 +2052,57 @@ class WowSetupGroup(app_commands.Group):
         await interaction.edit_original_response(
             embeds=embeds, attachments=files or discord.utils.MISSING)
         remember_character(interaction.guild_id, who["name"], realm, region, who["realm"])
+
+    @app_commands.command(name="lookup_channels",
+                          description="Limit /wow check, mplus and raid to certain channels")
+    @app_commands.describe(action="Add, remove, or lift the restriction entirely",
+                           channel="The channel to add or remove")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="➕ Allow this channel", value="add"),
+        app_commands.Choice(name="➖ Remove this channel", value="remove"),
+        app_commands.Choice(name="🔓 Allow everywhere", value="clear"),
+    ])
+    async def lookup_channels(self, interaction: discord.Interaction, action: str,
+                              channel: discord.TextChannel = None):
+        if not is_admin(interaction):
+            return await interaction.response.send_message(
+                embed=error_embed("Administrators only."), ephemeral=True)
+
+        key     = str(interaction.guild_id)
+        allowed = list(command_channels.get(key, []))
+
+        if action == "clear":
+            command_channels.pop(key, None)
+            save_data()
+            return await interaction.response.send_message(embed=discord.Embed(
+                title="🔓  Restriction lifted",
+                description="Character lookups work in every channel again.",
+                color=0x00FF98), ephemeral=True)
+
+        if channel is None:
+            return await interaction.response.send_message(
+                embed=error_embed("Pick a channel for this action."), ephemeral=True)
+
+        if action == "add" and channel.id not in allowed:
+            allowed.append(channel.id)
+        elif action == "remove" and channel.id in allowed:
+            allowed.remove(channel.id)
+
+        if allowed:
+            command_channels[key] = allowed
+        else:
+            command_channels.pop(key, None)
+        save_data()
+
+        places = "  ".join(f"<#{cid}>" for cid in allowed) if allowed else "*everywhere*"
+        embed  = discord.Embed(
+            title="✅  Lookup channels updated",
+            description=f"**/wow check**, **/wowsetup mplus** and **/wowsetup raid** "
+                        f"may now be used in: {places}",
+            color=0x00FF98,
+        )
+        embed.set_footer(text="WoW Bot  ·  Setup complete")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="news_channel", description="Set the channel for WoW news & patch notes")
     @app_commands.describe(channel_id="Channel ID (right-click → Copy ID)")
@@ -2115,6 +2191,13 @@ class WowSetupGroup(app_commands.Group):
         embed.add_field(name="📰  News Channel",        value=channel_line(news_channel_id),  inline=True)
         embed.add_field(name="🔄  Reset Channel",       value=channel_line(reset_channel_id), inline=True)
         embed.add_field(name="🔧  Maintenance Channel", value=channel_line(maint_channel_id), inline=True)
+        lookup = allowed_channels(interaction.guild_id)
+        embed.add_field(
+            name="🔍  Lookup Channels",
+            value=("  ".join(f"<#{cid}>" for cid in lookup) if lookup
+                   else "✅  *Every channel*"),
+            inline=False,
+        )
         embed.add_field(
             name="🔑  API Status",
             value=(
