@@ -819,6 +819,7 @@ async def build_mplus_runs(rio: dict) -> list:
             "level":      run.get("mythic_level", 0),
             "score":      run.get("score", 0),
             "upgrades":   run.get("num_keystone_upgrades", 0),
+            "spec":       (run.get("spec") or {}).get("name", ""),
             "art":        image,
         }
         for run, image in zip(runs, art)

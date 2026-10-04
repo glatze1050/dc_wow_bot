@@ -22,7 +22,7 @@ ROW_H     = 34
 # Boss, Best %, Highest DPS, Kills, Fastest, Med, Points, Rank
 COLUMNS = (
     ("Boss",        290, "left"),
-    ("Spec",        150, "left"),
+    ("Spec",        172, "left"),
     ("Best %",       92, "right"),
     ("Highest DPS", 150, "right"),
     ("Kills",        72, "right"),
@@ -144,7 +144,8 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
         plain  = TEXT if killed else TEXT_FAINT
         values = (
             fit(draw, boss.get("boss", "?"), fonts["cell"], COLUMNS[0][1] - 24),
-            spec_label(boss.get("spec", "")) if killed else "—",
+            fit(draw, spec_label(boss.get("spec", "")), fonts["cell"],
+                COLUMNS[1][1] - 20) if killed else "—",
             "—" if best_p is None else f"{best_p:.0f}",
             "—" if not number(boss.get("dps")) else f"{number(boss['dps']):,.0f}",
             str(number(boss.get("kills")) or 0),
@@ -179,7 +180,7 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
 # Dungeon, Level, Runs, Points, Rank, Best DPS, Best %, Median %
 DUNGEON_COLUMNS = (
     ("Dungeon",   270, "left"),
-    ("Spec",      150, "left"),
+    ("Spec",      172, "left"),
     ("Level",      80, "right"),
     ("Runs",       80, "right"),
     ("Points",    100, "right"),
@@ -249,7 +250,8 @@ def render_dungeons(header: dict, summary: dict, rows: list) -> bytes | None:
         dps   = number(row.get("dps"))
         values = (
             fit(draw, row.get("dungeon", "?"), fonts["cell"], DUNGEON_COLUMNS[0][1] - 24),
-            spec_label(row.get("spec", "")),
+            fit(draw, spec_label(row.get("spec", "")), fonts["cell"],
+                DUNGEON_COLUMNS[1][1] - 20),
             "—" if level is None else f"+{level:.0f}",
             str(number(row.get("runs")) or 0),
             "—" if number(row.get("points")) is None else f"{row['points']:.0f}",
