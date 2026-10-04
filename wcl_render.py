@@ -10,7 +10,7 @@ from render_util import (
     fit, font, open_square, role_colour, spec_label, text_width, to_png,
 )
 
-SPEC_ICON = 22
+SPEC_ICON = 26
 
 if PILLOW_AVAILABLE:
     from PIL import Image, ImageDraw
@@ -23,8 +23,8 @@ ROW_H     = 34
 
 # Boss, Best %, Highest DPS, Kills, Fastest, Med, Points, Rank
 COLUMNS = (
-    ("Boss",        250, "left"),
-    ("Spec",        212, "left"),
+    ("Boss",        388, "left"),
+    ("Spec",         74, "left"),
     ("Best %",       92, "right"),
     ("Highest DPS", 150, "right"),
     ("Kills",        72, "right"),
@@ -76,21 +76,22 @@ def kill_time(milliseconds) -> str:
 
 
 def _spec_cell(canvas, draw, row: dict, left: int, width: int, y: int, face, dim: bool):
-    """The specialisation icon, then its name and role."""
+    """Just the specialisation icon, framed in the colour of its role."""
+    spec = row.get("spec", "")
     icon = row.get("spec_icon")
-    x    = left + 12
-    if icon:
-        try:
-            canvas.paste(open_square(icon, SPEC_ICON), (x, y + 2))
-            draw.rectangle([x, y + 2, x + SPEC_ICON, y + 2 + SPEC_ICON],
-                           outline=OUTLINE, width=1)
-            x += SPEC_ICON + 8
-        except Exception:
-            pass
-    spec   = row.get("spec", "")
-    label  = spec_label(spec) if spec else "—"
-    colour = TEXT_FAINT if dim or not spec else role_colour(spec)
-    draw.text((x, y), fit(draw, label, face, left + width - x - 10), font=face, fill=colour)
+    if not spec or dim:
+        _cell(draw, "—", left, width, "left", y, face, TEXT_FAINT)
+        return
+    if not icon:
+        _cell(draw, spec[:3], left, width, "left", y, face, role_colour(spec))
+        return
+    x = left + 12
+    try:
+        canvas.paste(open_square(icon, SPEC_ICON), (x, y - 1))
+        draw.rectangle([x - 1, y - 2, x + SPEC_ICON, y - 1 + SPEC_ICON],
+                       outline=role_colour(spec), width=2)
+    except Exception:
+        _cell(draw, spec[:3], left, width, "left", y, face, role_colour(spec))
 
 
 def _cell(draw, text: str, left: int, width: int, align: str, y: int, face, colour):
@@ -203,8 +204,8 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
 
 # Dungeon, Level, Runs, Points, Rank, Best DPS, Best %, Median %
 DUNGEON_COLUMNS = (
-    ("Dungeon",   230, "left"),
-    ("Spec",      212, "left"),
+    ("Dungeon",   368, "left"),
+    ("Spec",       74, "left"),
     ("Level",      80, "right"),
     ("Runs",       80, "right"),
     ("Points",    100, "right"),
