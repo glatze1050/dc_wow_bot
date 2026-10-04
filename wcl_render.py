@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from render_util import (
     BG, OUTLINE, PANEL, PILLOW_AVAILABLE, TEXT, TEXT_DIM, TEXT_FAINT,
-    fit, font, role_colour, spec_label, text_width, to_png,
+    fit, font, open_square, role_colour, spec_label, text_width, to_png,
 )
+
+SPEC_ICON = 22
 
 if PILLOW_AVAILABLE:
     from PIL import Image, ImageDraw
@@ -21,8 +23,8 @@ ROW_H     = 34
 
 # Boss, Best %, Highest DPS, Kills, Fastest, Med, Points, Rank
 COLUMNS = (
-    ("Boss",        290, "left"),
-    ("Spec",        172, "left"),
+    ("Boss",        250, "left"),
+    ("Spec",        212, "left"),
     ("Best %",       92, "right"),
     ("Highest DPS", 150, "right"),
     ("Kills",        72, "right"),
@@ -71,6 +73,24 @@ def kill_time(milliseconds) -> str:
         return "—"
     seconds = int(milliseconds // 1000)
     return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _spec_cell(canvas, draw, row: dict, left: int, width: int, y: int, face, dim: bool):
+    """The specialisation icon, then its name and role."""
+    icon = row.get("spec_icon")
+    x    = left + 12
+    if icon:
+        try:
+            canvas.paste(open_square(icon, SPEC_ICON), (x, y + 2))
+            draw.rectangle([x, y + 2, x + SPEC_ICON, y + 2 + SPEC_ICON],
+                           outline=OUTLINE, width=1)
+            x += SPEC_ICON + 8
+        except Exception:
+            pass
+    spec   = row.get("spec", "")
+    label  = spec_label(spec) if spec else "—"
+    colour = TEXT_FAINT if dim or not spec else role_colour(spec)
+    draw.text((x, y), fit(draw, label, face, left + width - x - 10), font=face, fill=colour)
 
 
 def _cell(draw, text: str, left: int, width: int, align: str, y: int, face, colour):
@@ -144,8 +164,7 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
         plain  = TEXT if killed else TEXT_FAINT
         values = (
             fit(draw, boss.get("boss", "?"), fonts["cell"], COLUMNS[0][1] - 24),
-            fit(draw, spec_label(boss.get("spec", "")), fonts["cell"],
-                COLUMNS[1][1] - 20) if killed else "—",
+            None,          # drawn separately: it carries an icon
             "—" if best_p is None else f"{best_p:.0f}",
             "—" if not number(boss.get("dps")) else f"{number(boss['dps']):,.0f}",
             str(number(boss.get("kills")) or 0),
@@ -159,8 +178,13 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
                    parse_colour(boss.get("median")), plain,
                    TEXT_DIM if killed else TEXT_FAINT)
         x = MARGIN
-        for (_, width, align), value, colour in zip(COLUMNS, values, colours):
-            _cell(draw, value, x, width, align, y + 8, fonts["cell"], colour)
+        for index, ((_, width, align), value, colour) in enumerate(
+                zip(COLUMNS, values, colours)):
+            if value is None:
+                _spec_cell(canvas, draw, boss, x, width, y + 8, fonts["cell"],
+                           not killed)
+            else:
+                _cell(draw, value, x, width, align, y + 8, fonts["cell"], colour)
             x += width
 
     table_bottom = top + len(rows) * ROW_H
@@ -179,8 +203,8 @@ def render_wcl(header: dict, summary: dict, bosses: list, notes: list = ()) -> b
 
 # Dungeon, Level, Runs, Points, Rank, Best DPS, Best %, Median %
 DUNGEON_COLUMNS = (
-    ("Dungeon",   270, "left"),
-    ("Spec",      172, "left"),
+    ("Dungeon",   230, "left"),
+    ("Spec",      212, "left"),
     ("Level",      80, "right"),
     ("Runs",       80, "right"),
     ("Points",    100, "right"),
@@ -250,8 +274,7 @@ def render_dungeons(header: dict, summary: dict, rows: list) -> bytes | None:
         dps   = number(row.get("dps"))
         values = (
             fit(draw, row.get("dungeon", "?"), fonts["cell"], DUNGEON_COLUMNS[0][1] - 24),
-            fit(draw, spec_label(row.get("spec", "")), fonts["cell"],
-                DUNGEON_COLUMNS[1][1] - 20),
+            None,          # drawn separately: it carries an icon
             "—" if level is None else f"+{level:.0f}",
             str(number(row.get("runs")) or 0),
             "—" if number(row.get("points")) is None else f"{row['points']:.0f}",
@@ -264,8 +287,13 @@ def render_dungeons(header: dict, summary: dict, rows: list) -> bytes | None:
                    SCORE_COLOUR, TEXT_DIM, TEXT,
                    parse_colour(row.get("best")), parse_colour(row.get("median")))
         x = MARGIN
-        for (_, width, align), value, colour in zip(DUNGEON_COLUMNS, values, colours):
-            _cell(draw, value, x, width, align, y + 8, fonts["cell"], colour)
+        for index, ((_, width, align), value, colour) in enumerate(
+                zip(DUNGEON_COLUMNS, values, colours)):
+            if value is None:
+                _spec_cell(canvas, draw, row, x, width, y + 8, fonts["cell"],
+                           False)
+            else:
+                _cell(draw, value, x, width, align, y + 8, fonts["cell"], colour)
             x += width
 
     draw.rectangle([MARGIN, HEADER_H + DUNGEON_SUMMARY_H, DUNGEON_WIDTH - MARGIN,

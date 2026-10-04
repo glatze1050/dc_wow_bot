@@ -805,6 +805,7 @@ async def character_header(realm: str, name: str, region: str) -> dict:
     return {
         "name":   (summary or {}).get("name", name.capitalize()),
         "realm":  (summary or {}).get("realm", {}).get("name", realm),
+        "class":  char_class,
         "emoji":  CLASS_EMOJIS.get(char_class, "⚔️"),
         "colour": CLASS_COLORS.get(char_class, 0x888888),
         "rgb":    render_util.rgb(CLASS_COLORS.get(char_class)),
@@ -846,6 +847,7 @@ async def mplus_panels(who: dict, realm: str, name: str, region: str):
         return embeds, files
 
     if rows:
+        await attach_spec_icons(rows, who["class"], region)
         table = await asyncio.to_thread(
             wcl_render.render_dungeons,
             header={"title": f"{who['name']} — Mythic+ Dungeons",
@@ -876,6 +878,7 @@ async def raid_panels(who: dict, realm: str, name: str, region: str):
     summary, rows = wcl_table_data(zone)
     if not rows:
         return [], []
+    await attach_spec_icons(rows, who["class"], region)
 
     table = await asyncio.to_thread(
         wcl_render.render_wcl,
@@ -889,6 +892,77 @@ async def raid_panels(who: dict, realm: str, name: str, region: str):
         files.append(discord.File(io.BytesIO(table), filename="logs.png"))
         embed.set_image(url="attachment://logs.png")
     return [embed], files
+
+
+SPEC_INDEX_TTL = 24 * 3600
+_spec_index: dict = {}
+
+
+async def spec_index(region: str) -> dict:
+    """(class, spec) -> spec id. Warcraft Logs names a spec but not its class,
+    and names repeat: Holy belongs to both the priest and the paladin."""
+    now    = datetime.now(timezone.utc).timestamp()
+    cached = _spec_index.get(region)
+    if cached and now < cached[0]:
+        return cached[1]
+    try:
+        index   = await blizzard_get("/data/wow/playable-class/index", region, f"static-{region}")
+        classes = index.get("classes", [])
+        details = await asyncio.gather(*(
+            blizzard_get(f"/data/wow/playable-class/{c['id']}", region, f"static-{region}")
+            for c in classes
+        ))
+    except Exception as exc:
+        print(f"[WARN] Spec index failed: {exc}")
+        return cached[1] if cached else {}
+
+    table = {}
+    for playable_class, detail in zip(classes, details):
+        for spec in detail.get("specializations", []):
+            table[(playable_class["name"], spec["name"])] = spec["id"]
+    _spec_index[region] = (now + SPEC_INDEX_TTL, table)
+    return table
+
+
+async def get_spec_icon(spec_id: int, region: str):
+    """Icon bytes for a specialisation, cached beside the item icons."""
+    key = f"spec:{spec_id}"
+    if not spec_id:
+        return None
+    if key in _icon_cache:
+        return _icon_cache[key]
+    icon = None
+    try:
+        media = await blizzard_get(f"/data/wow/media/playable-specialization/{spec_id}",
+                                   region, f"static-{region}")
+        for asset in media.get("assets", []):
+            if asset.get("key") != "icon":
+                continue
+            for candidate in icon_url_variants(asset["value"]):
+                icon = await download_bytes(candidate)
+                if icon:
+                    break
+            break
+    except Exception as exc:
+        print(f"[WARN] Spec icon {spec_id} failed: {exc}")
+    _icon_cache[key] = icon
+    if len(_icon_cache) > ICON_CACHE_SIZE:
+        _icon_cache.pop(next(iter(_icon_cache)))
+    return icon
+
+
+async def attach_spec_icons(rows: list, char_class: str, region: str) -> None:
+    """Give every row the icon of the spec it was recorded as."""
+    table = await spec_index(region)
+    if not table:
+        return
+    wanted = {row.get("spec") for row in rows if row.get("spec")}
+    ids    = {spec: table.get((char_class, spec)) for spec in wanted}
+    icons  = dict(zip(ids, await asyncio.gather(*(
+        get_spec_icon(spec_id, region) for spec_id in ids.values()
+    ))))
+    for row in rows:
+        row["spec_icon"] = icons.get(row.get("spec"))
 
 
 ART_CACHE_SIZE = 60
@@ -1651,6 +1725,7 @@ class WowGroup(app_commands.Group):
         if wcl_ok:
             try:
                 dungeon_summary, dungeon_rows = await dungeon_rankings(realm, name, region)
+                await attach_spec_icons(dungeon_rows, char_class, region)
             except Exception as exc:
                 print(f"[WARN] Dungeon rankings failed: {exc}")
         if dungeon_rows:
@@ -1698,6 +1773,7 @@ class WowGroup(app_commands.Group):
                          else zone.get("zoneName", "Current Raid"))
             difficulty = {3: "Normal", 4: "Heroic", 5: "Mythic"}.get(zone.get("difficulty"), "")
             summary, boss_rows = wcl_table_data(zone)
+            await attach_spec_icons(boss_rows, char_class, region)
 
             table = await asyncio.to_thread(
                 wcl_render.render_wcl,
