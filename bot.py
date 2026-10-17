@@ -680,7 +680,6 @@ async def get_wcl_token() -> str:
 
 async def get_wcl_character(realm: str, name: str, region: str) -> dict:
     """Best parses in the current raid zone, plus the profile link."""
-    token = await get_wcl_token()
     query = """
     query($name: String!, $server: String!, $region: String!) {
       characterData {
@@ -693,25 +692,16 @@ async def get_wcl_character(realm: str, name: str, region: str) -> dict:
       }
     }
     """
-    variables = {
+    data = await wcl_query(query, {
         "name":   name.capitalize(),
         "server": realm_slug(realm),
         "region": region.upper(),
-    }
-    async with aiohttp.ClientSession() as s:
-        async with s.post(
-            "https://www.warcraftlogs.com/api/v2/client",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"query": query, "variables": variables},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as r:
-            if r.status != 200:
-                raise ValueError(f"Warcraft Logs API error ({r.status})")
-            data = await r.json()
-            char = (data.get("data") or {}).get("characterData", {}).get("character")
-            if not char:
-                raise ValueError("Character not found on Warcraft Logs.")
-            return char
+    })
+    character = (data.get("characterData") or {}).get("character")
+    if not character:
+        raise ValueError("Character not found on Warcraft Logs.")
+    return character
+
 
 def wcl_parse_emoji(pct: float) -> str:
     if pct >= 99: return "🟠"   # Artifact / Legendary
@@ -729,15 +719,35 @@ MPLUS_ZONE_TTL = 12 * 3600
 _mplus_zone: dict = {}
 
 
-async def wcl_query(query: str, variables: dict) -> dict:
-    token = await get_wcl_token()
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-        async with session.post(WCL_ENDPOINT,
-                                headers={"Authorization": f"Bearer {token}"},
-                                json={"query": query, "variables": variables}) as response:
-            if response.status != 200:
-                raise ValueError(f"Warcraft Logs API error ({response.status})")
-            payload = await response.json()
+def invalidate_wcl_token() -> None:
+    global _wcl_token, _wcl_token_expiry
+    _wcl_token, _wcl_token_expiry = None, 0
+
+
+async def wcl_query(query: str, variables: dict = None) -> dict:
+    """A token lasts a year by the clock, but Warcraft Logs can reject it long
+    before that. Cached for a year and never re-requested, one rejection used
+    to keep every raid lookup broken until the bot was restarted, so a 401
+    throws the token away and asks for a new one."""
+    payload = None
+    for attempt in range(2):
+        token = await get_wcl_token()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            async with session.post(WCL_ENDPOINT,
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    json={"query": query, "variables": variables or {}}) as response:
+                # The endpoint URL is fixed, so none of these mean "not found":
+                # a missing character comes back as 200 with an empty result.
+                if response.status in (401, 403, 404) and attempt == 0:
+                    print("[WARN] Warcraft Logs rejected the cached token; renewing")
+                    invalidate_wcl_token()
+                    continue
+                if response.status != 200:
+                    raise ValueError(f"Warcraft Logs API error ({response.status})")
+                payload = await response.json()
+        break
+    if payload is None:
+        raise ValueError("Warcraft Logs API error (401)")
     if payload.get("errors"):
         raise ValueError(payload["errors"][0].get("message", "Warcraft Logs rejected the query"))
     return payload.get("data") or {}
