@@ -873,6 +873,8 @@ async def mplus_panels(who: dict, realm: str, name: str, region: str):
         summary, rows = await dungeon_rankings(realm, name, region)
     except Exception as exc:
         print(f"[WARN] Dungeon rankings failed: {exc}")
+        if not embeds:
+            raise LookupProblem(wcl_absence(exc)) from exc
         return embeds, files
 
     if rows:
@@ -897,7 +899,7 @@ async def raid_panels(who: dict, realm: str, name: str, region: str):
         wcl = await get_wcl_character(realm, name, region)
     except Exception as exc:
         print(f"[WARN] warcraft logs failed for {name}-{realm}: {type(exc).__name__}: {exc}")
-        return [], []
+        raise LookupProblem(wcl_absence(exc)) from exc
 
     zone       = read_zone_rankings(wcl)
     zone_field = zone.get("zone")
@@ -906,7 +908,7 @@ async def raid_panels(who: dict, realm: str, name: str, region: str):
     difficulty = {3: "Normal", 4: "Heroic", 5: "Mythic"}.get(zone.get("difficulty"), "")
     summary, rows = wcl_table_data(zone)
     if not rows:
-        return [], []
+        raise LookupProblem(f"**{who['name']}** has no ranked bosses in the current raid.")
     await attach_spec_icons(rows, who["class"], region)
 
     table = await asyncio.to_thread(
@@ -1025,6 +1027,20 @@ async def build_mplus_runs(rio: dict) -> list:
         }
         for run, image in zip(runs, art)
     ]
+
+
+class LookupProblem(Exception):
+    """A reason worth showing the caller, worded for them rather than a log."""
+
+
+def wcl_absence(error) -> str:
+    """Tell apart a character with no logs from a lookup that did not finish."""
+    if error is None:
+        return "*This character has no public raid logs.*"
+    if "not found on Warcraft Logs" in str(error):
+        return "*This character has no logs on Warcraft Logs yet.*"
+    return (f"⚠️ *Warcraft Logs could not be reached: {error}.* "
+            "The character may well have logs — try again in a moment.")
 
 
 def read_zone_rankings(wcl: dict) -> dict:
@@ -1505,11 +1521,15 @@ class WowGroup(app_commands.Group):
         blizzard_ok = bool(BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET)
         wcl_ok      = bool(WCL_CLIENT_ID and WCL_CLIENT_SECRET)
 
+        failures: dict = {}
+
         async def safe(coro, label: str = ""):
-            """A missing source must not sink the command, but it must be visible."""
+            """A missing source must not sink the command, but the reason has to
+            survive: "no logs" and "the lookup broke" read the same otherwise."""
             try:
                 return await coro
             except Exception as exc:
+                failures[label] = exc
                 print(f"[WARN] {label or 'lookup'} failed for {name}-{realm}: "
                       f"{type(exc).__name__}: {exc}")
                 return None
@@ -1831,7 +1851,7 @@ class WowGroup(app_commands.Group):
         elif not wcl_ok:
             e4.description = "*Warcraft Logs API not configured (set WCL_CLIENT_ID / WCL_CLIENT_SECRET in .env).*"
         else:
-            e4.description = "*This character has no public raid logs.*"
+            e4.description = wcl_absence(failures.get("warcraft logs"))
 
         embeds.append(e4)
 
@@ -2054,7 +2074,10 @@ class WowSetupGroup(app_commands.Group):
             region = remembered.get("region") or region
 
         who = await character_header(realm, name, region)
-        embeds, files = await builder(who, realm, name, region)
+        try:
+            embeds, files = await builder(who, realm, name, region)
+        except LookupProblem as problem:
+            return await interaction.edit_original_response(embed=error_embed(str(problem)))
         if not embeds:
             return await interaction.edit_original_response(embed=error_embed(
                 f"No {what} found for **{who['name']}** on **{realm}**."))
